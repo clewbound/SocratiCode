@@ -399,7 +399,26 @@ Use Google's Gemini embedding API. Requires an [API key](https://aistudio.google
 
 If you use [git worktrees](https://git-scm.com/docs/git-worktree) — or any workflow where the same repository lives in multiple directories — each path would normally get its own Qdrant index. This means redundant embedding and storage for what is essentially the same codebase.
 
-Set `SOCRATICODE_PROJECT_ID` to share a single index across all directories of the same project. Add a `.mcp.json` at the root of each worktree (and your main checkout):
+Set `SOCRATICODE_PROJECT_ID` to share a single index across all directories of the same project.
+
+#### MCP hosts with git worktree detection (e.g. Claude Code)
+
+Some MCP hosts (like [Claude Code](https://claude.ai/claude-code)) resolve the project root by following git worktree links. Since worktrees point back to the main repository's `.git` directory, the host automatically maps all worktrees to the same project config. This means you only need to configure the MCP server **once** for the main checkout — all worktrees inherit it automatically.
+
+For Claude Code, add the server with local scope from your main checkout:
+
+```bash
+cd /path/to/main-checkout
+claude mcp add -e SOCRATICODE_PROJECT_ID=my-project --scope local socraticode -- npx -y socraticode
+```
+
+All worktrees created from this repo will automatically connect to socraticode with the shared project ID. No per-worktree setup needed.
+
+> **Note:** This only works for git worktrees. Separate `git clone`s of the same repo have independent `.git` directories and won't share the config.
+
+#### Other MCP hosts (per-project `.mcp.json`)
+
+For MCP hosts that don't resolve git worktree paths, add a `.mcp.json` at the root of each worktree (and your main checkout):
 
 ```json
 {
@@ -415,9 +434,11 @@ Set `SOCRATICODE_PROJECT_ID` to share a single index across all directories of t
 }
 ```
 
-With this config, agents running in `/repo/main`, `/repo/worktree-feat-a`, and `/repo/worktree-fix-b` all share the same `codebase_my-project`, `codegraph_my-project`, and `context_my-project` Qdrant collections.
+Add `.mcp.json` to your `.gitignore` if you don't want it tracked.
 
-> **Why per-project `.mcp.json` instead of global config?** A global MCP config doesn't know which project directory to index. Per-project `.mcp.json` lets each repo specify its own `SOCRATICODE_PROJECT_ID` while worktrees of the same repo share the same value. Add `.mcp.json` to your `.gitignore` if you don't want it tracked.
+#### How it works
+
+With this config, agents running in `/repo/main`, `/repo/worktree-feat-a`, and `/repo/worktree-fix-b` all share the same `codebase_my-project`, `codegraph_my-project`, and `context_my-project` Qdrant collections.
 
 **How it works in practice:**
 
