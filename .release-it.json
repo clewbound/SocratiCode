@@ -1,4 +1,7 @@
 {
+  "hooks": {
+    "after:bump": "node -e \"const fs=require('fs'); const p=JSON.parse(fs.readFileSync('.claude-plugin/plugin.json','utf8')); p.version='${version}'; fs.writeFileSync('.claude-plugin/plugin.json', JSON.stringify(p,null,2)+'\\n');\""
+  },
   "git": {
     "commitMessage": "chore: release v${version}",
     "tagName": "v${version}",

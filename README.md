@@ -13,6 +13,7 @@
 </p>
 
 <p align="center">
+  <a href="#claude-code-plugin-recommended-for-claude-code-users"><img src="https://img.shields.io/badge/Claude_Code-Install_Plugin-CC785C?style=flat-square&logoColor=white" alt="Install Claude Code Plugin"></a>
   <a href="https://insiders.vscode.dev/redirect/mcp/install?name=socraticode&config=%7B%22command%22%3A%22npx%22%2C%22args%22%3A%5B%22-y%22%2C%22socraticode%22%5D%7D"><img src="https://img.shields.io/badge/VS_Code-Install_MCP_Server-0098FF?style=flat-square&logo=visualstudiocode&logoColor=white" alt="Install in VS Code"></a>
   <a href="https://insiders.vscode.dev/redirect/mcp/install?name=socraticode&config=%7B%22command%22%3A%22npx%22%2C%22args%22%3A%5B%22-y%22%2C%22socraticode%22%5D%7D&quality=insiders"><img src="https://img.shields.io/badge/VS_Code_Insiders-Install_MCP_Server-24bfa5?style=flat-square&logo=visualstudiocode&logoColor=white" alt="Install in VS Code Insiders"></a>
   <a href="cursor://anysphere.cursor-deeplink/mcp/install?name=socraticode&config=eyJjb21tYW5kIjoibnB4IiwiYXJncyI6WyIteSIsInNvY3JhdGljb2RlIl19"><img src="https://img.shields.io/badge/Cursor-Install_MCP_Server-F14C28?style=flat-square&logo=cursor&logoColor=white" alt="Install in Cursor"></a>
@@ -28,15 +29,25 @@
 
 > If SocratiCode has been useful to you, please ⭐ **star this repo** — it helps others discover it — and share it with your dev team and fellow developers!
 
-**One thing, done well: deep codebase intelligence — zero setup, no bloat, fully automatic.** SocratiCode gives AI assistants deep semantic understanding of your codebase — hybrid search, polyglot code dependency graphs, and searchable context artifacts (database schemas, API specs, infra configs, architecture docs). Zero configuration — add it to any MCP host and it manages everything automatically.
+**One thing, done well: deep codebase intelligence — zero setup, no bloat, fully automatic.** SocratiCode gives AI assistants deep semantic understanding of your codebase — hybrid search, polyglot code dependency graphs, and searchable context artifacts (database schemas, API specs, infra configs, architecture docs). Zero configuration — add it to **any MCP host**, or install the **Claude Code plugin** for built-in workflow skills. It manages everything automatically.
 
 **Production-ready**, battle-tested on **enterprise-level** large repositories (up to and over **~40 million lines of code**). **Batched**, automatic **resumable** indexing checkpoints progress — pauses, crashes, restarts, and interruptions don't lose work. The file watcher keeps the **index automatically updated** at every file change and across sessions. **Multi-agent ready** — multiple AI agents can work on the same codebase simultaneously, sharing a single index with automatic coordination and zero configuration.
 
 **Private and local by default** — Docker handles everything, no API keys required, no data leaves your machine. **Cloud ready** for embeddings (OpenAI, Google Gemini) and Qdrant, and a **full suite of configuration options** are all available when you need them.
 
-The first Qdrant‑based MCP server that pairs auto‑managed, zero‑config local Docker deployment with **AST‑aware code chunking, hybrid semantic + BM25 (RRF‑fused) code search**, polyglot dependency **graphs** with circular‑dependency visualization, and searchable **infra/API/database artifacts** in a single focused, zero-config and easy to use code intelligence engine.
+The first Qdrant‑based MCP/Claude Plugin/Skill that pairs auto‑managed, zero‑config local Docker deployment with **AST‑aware code chunking, hybrid semantic + BM25 (RRF‑fused) code search**, polyglot dependency **graphs** with circular‑dependency visualization, and searchable **infra/API/database artifacts** in a single focused, zero-config and easy to use code intelligence engine.
 
 > **Benchmarked on VS Code (2.45M lines):** SocratiCode uses **61% less context**, **84% fewer tool calls**, and is **37x faster** than grep‑based exploration — tested live with Claude Opus 4.6. [See the full benchmark →](#real-world-benchmark-vs-code-245m-lines-of-code-with-claude-opus-46)
+
+<p align="center">
+<a href="https://www.star-history.com/?repos=giancarloerra%2Fsocraticode&type=date&logscale=&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/image?repos=giancarloerra/socraticode&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/image?repos=giancarloerra/socraticode&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/image?repos=giancarloerra/socraticode&type=date&legend=top-left" />
+ </picture>
+</a>
+</p>
 
 ## Contents
 
@@ -63,9 +74,10 @@ The first Qdrant‑based MCP server that pairs auto‑managed, zero‑config loc
 
 > **Only [Docker](https://www.docker.com/products/docker-desktop/) (running) required.**
 
-**One-click install** — VS Code and Cursor:
+**One-click install** — Claude Code, VS Code and Cursor,:
 
-[![Install in VS Code](https://img.shields.io/badge/VS_Code-Install_MCP_Server-0098FF?style=flat-square&logo=visualstudiocode&logoColor=white)](https://insiders.vscode.dev/redirect/mcp/install?name=socraticode&config=%7B%22command%22%3A%22npx%22%2C%22args%22%3A%5B%22-y%22%2C%22socraticode%22%5D%7D) [![Install in VS Code Insiders](https://img.shields.io/badge/VS_Code_Insiders-Install_MCP_Server-24bfa5?style=flat-square&logo=visualstudiocode&logoColor=white)](https://insiders.vscode.dev/redirect/mcp/install?name=socraticode&config=%7B%22command%22%3A%22npx%22%2C%22args%22%3A%5B%22-y%22%2C%22socraticode%22%5D%7D&quality=insiders) [![Install in Cursor](https://img.shields.io/badge/Cursor-Install_MCP_Server-F14C28?style=flat-square&logo=cursor&logoColor=white)](cursor://anysphere.cursor-deeplink/mcp/install?name=socraticode&config=eyJjb21tYW5kIjoibnB4IiwiYXJncyI6WyIteSIsInNvY3JhdGljb2RlIl19)
+[![Install Claude Code Plugin](https://img.shields.io/badge/Claude_Code-Install_Plugin-CC785C?style=flat-square&logoColor=white)](#claude-code-plugin-recommended-for-claude-code-users)
+[![Install in VS Code](https://img.shields.io/badge/VS_Code-Install_MCP_Server-0098FF?style=flat-square&logo=visualstudiocode&logoColor=white)](https://insiders.vscode.dev/redirect/mcp/install?name=socraticode&config=%7B%22command%22%3A%22npx%22%2C%22args%22%3A%5B%22-y%22%2C%22socraticode%22%5D%7D) [![Install in VS Code Insiders](https://img.shields.io/badge/VS_Code_Insiders-Install_MCP_Server-24bfa5?style=flat-square&logo=visualstudiocode&logoColor=white)](https://insiders.vscode.dev/redirect/mcp/install?name=socraticode&config=%7B%22command%22%3A%22npx%22%2C%22args%22%3A%5B%22-y%22%2C%22socraticode%22%5D%7D&quality=insiders) [![Install in Cursor](https://img.shields.io/badge/Cursor-Install_MCP_Server-F14C28?style=flat-square&logo=cursor&logoColor=white)](cursor://anysphere.cursor-deeplink/mcp/install?name=socraticode&config=eyJjb21tYW5kIjoibnB4IiwiYXJncyI6WyIteSIsInNvY3JhdGljb2RlIl19) 
 
 **All MCP hosts** — add the following to your `mcpServers` (Claude Desktop, Windsurf, Cline, Roo Code) or `servers` (VS Code project-local `.vscode/mcp.json`) config:
 
@@ -76,7 +88,13 @@ The first Qdrant‑based MCP server that pairs auto‑managed, zero‑config loc
 }
 ```
 
-**Claude Code** — run this command:
+**Claude Code** — install the plugin (recommended, includes workflow skills for best results):
+
+```bash
+claude plugin add --from-github giancarloerra/socraticode
+```
+
+Or as MCP only (without skills):
 
 ```bash
 claude mcp add socraticode -- npx -y socraticode
@@ -100,13 +118,15 @@ Restart your host. On first use SocratiCode automatically pulls Docker images, s
 
 > **Recommended**: For best results, add the [Agent Instructions](#agent-instructions) to your AI assistant's system prompt or project instructions file (`CLAUDE.md`, `AGENTS.md`, etc.). The key principle — **search before reading** — helps your AI use SocratiCode's tools effectively and avoid unnecessary file reads.
 
+> **Claude Code users**: If you installed the SocratiCode plugin, the Agent Instructions are included automatically as skills — no need to add them to your `CLAUDE.md`. The plugin also bundles the MCP server, so you don't need a separate `claude mcp add`.
+
 > **Advanced**: cloud embeddings (OpenAI / Google), external Qdrant, remote Ollama, native Ollama, and dozens of tuning options are all available. See [Configuration](#configuration) below.
 
 ## Why SocratiCode
 
 I built SocratiCode because I regularly work on existing, large, and complex codebases across different languages and need to quickly understand them and act. Existing solutions were either too limited, insufficiently tested for production use, or bloated with unnecessary complexity. I wanted a single focused tool that does deep codebase intelligence well — zero setup, no bloat, fully automatic — and gets out of the way.
 
-- **True Zero Configuration** — Just add the MCP server to your AI host config. The server automatically pulls Docker images, starts Qdrant and Ollama containers, and downloads the embedding model on first use. No config files, no YAML, no environment variables to tune, no native dependencies to compile, no commands to type. Works everywhere Docker runs.
+- **True Zero Configuration** — Just install the Claude Plugin/Skill or add the MCP server to your AI host config. The server automatically pulls Docker images, starts Qdrant and Ollama containers, and downloads the embedding model on first use. No config files, no YAML, no environment variables to tune, no native dependencies to compile, no commands to type. Works everywhere Docker runs.
 - **Fully Private & Local by Default** — Everything runs on your machine. Your code never leaves your network. The default Docker setup includes Ollama and Qdrant with no external API calls. Optional cloud providers (Qdrant, OpenAI, Gemini) are available but never required.
 - **Language-Agnostic** — Works with every programming language, framework, and file type out of the box. No per-language parsers to install, no grammar files to maintain, no "unsupported language" limitations. If your AI can read it, SocratiCode can index it.
 - **Production-Grade Vector Search** — Built on Qdrant, a purpose-built vector database with HNSW indexing, concurrent read/write, and payload filtering. Collections store both a dense vector and a BM25 sparse vector per chunk; the Query API runs both sub-queries in a single round-trip and fuses results with RRF. Designed for scale vector search.
@@ -140,7 +160,7 @@ I built SocratiCode because I regularly work on existing, large, and complex cod
 - **Cross-process safety** — File-based locking (`proper-lockfile`) prevents multiple MCP instances from simultaneously indexing or watching the same project. Stale locks from crashed processes are automatically reclaimed. When another MCP process is already watching a project, `codebase_status` reports "active (watched by another process)" instead of incorrectly showing "inactive."
 - **Concurrency guards** — Duplicate indexing and graph-build operations are prevented. If you call `codebase_index` while indexing is already running, it returns the current progress instead of starting a second operation.
 - **Graceful stop** — Long-running indexing operations can be stopped safely with `codebase_stop`. The current batch finishes and checkpoints, preserving all progress. Re-run `codebase_index` to resume from where it left off.
-- **Graceful shutdown** — On server shutdown, active indexing operations are given up to 60 seconds to complete, all file watchers are stopped cleanly, and the MCP server closes gracefully.
+- **Graceful shutdown** — On server shutdown, active indexing operations are given up to 60 seconds to complete, all file watchers are stopped cleanly, and the everything closes gracefully.
 - **Structured logging** — All operations are logged with structured context for observability. Log level configurable via `SOCRATICODE_LOG_LEVEL`.
 - **Graceful degradation** — If infrastructure goes down during watch, the watcher backs off and retries instead of crashing.
 
@@ -200,6 +220,8 @@ User: "Are there any circular dependencies?"
 ```
 
 ## Agent Instructions
+
+> **Claude Code plugin users**: These instructions are included automatically as skills in the SocratiCode plugin. You don't need to copy them into `CLAUDE.md`. The section below is for non-Claude Code hosts (VS Code, Cursor, Claude Desktop, etc.).
 
 For best results, add instructions like the following to your AI assistant's system prompt, `CLAUDE.md`, `AGENTS.md`, or equivalent instructions file. The core principle: **search before reading**. The index gives you a map of the codebase in milliseconds; raw file reading is expensive and context-consuming.
 
@@ -270,7 +292,45 @@ before reading any files directly.
 
 ### Install
 
-#### npx (recommended — no installation)
+#### Claude Code plugin (recommended for Claude Code users)
+
+The SocratiCode plugin bundles both the MCP server and workflow skills that teach Claude how to use the tools effectively. One install gives you everything:
+
+```bash
+claude plugin add --from-github giancarloerra/socraticode
+```
+
+The plugin includes:
+- **MCP server** — all 21 SocratiCode tools (search, graph, context artifacts, etc.)
+- **Exploration skill** — teaches Claude the search-before-reading workflow
+- **Management skill** — guides setup, indexing, watching, and troubleshooting
+- **Explorer agent** — delegatable subagent for deep codebase analysis
+
+> If you previously installed SocratiCode as a standalone MCP (`claude mcp add socraticode`), remove it after installing the plugin to avoid duplicates: `claude mcp remove socraticode`
+
+**Configuring environment variables:** SocratiCode works with zero config for most users (local Ollama + managed Qdrant). If you need cloud embeddings, a remote Qdrant, or other customization:
+
+1. **Claude Code settings** (recommended) — add to `~/.claude/settings.json`:
+   ```json
+   {
+     "env": {
+       "EMBEDDING_PROVIDER": "openai",
+       "OPENAI_API_KEY": "sk-..."
+     }
+   }
+   ```
+   This works in all environments — CLI, VS Code, and JetBrains.
+
+2. **Shell profile** — set vars in `~/.zshrc` or `~/.bashrc`:
+   ```bash
+   export EMBEDDING_PROVIDER=openai
+   export OPENAI_API_KEY=sk-...
+   ```
+   Works when Claude Code is launched from a terminal. Note: IDE-launched sessions (e.g. VS Code opened from Finder/Dock) may not inherit shell profile variables — use option 1 instead.
+
+Restart Claude Code after changing variables. See [Environment Variables](#environment-variables) for all options.
+
+#### npx (recommended for all other MCP hosts — no installation)
 
 Requires Node.js 18+ and Docker (running). Already covered in [Quick Start](#quick-start) above, add the following to your `mcpServers` (Claude Desktop, Windsurf, Cline, Roo Code) or `servers` (VS Code project-local `.vscode/mcp.json`) config:
 
