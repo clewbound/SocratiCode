@@ -50,6 +50,11 @@
   "license": "AGPL-3.0-only",
   "files": [
     "dist",
+    ".claude-plugin",
+    "skills",
+    "agents",
+    "hooks",
+    ".mcp.json",
     "LICENSE",
     "LICENSE-COMMERCIAL",
     "README.md",
