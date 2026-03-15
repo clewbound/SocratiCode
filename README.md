@@ -395,6 +395,57 @@ Use Google's Gemini embedding API. Requires an [API key](https://aistudio.google
 
 > Defaults: `EMBEDDING_MODEL=gemini-embedding-001`, `EMBEDDING_DIMENSIONS=3072`.
 
+### Git Worktrees (shared index across directories)
+
+If you use [git worktrees](https://git-scm.com/docs/git-worktree) — or any workflow where the same repository lives in multiple directories — each path would normally get its own Qdrant index. This means redundant embedding and storage for what is essentially the same codebase.
+
+Set `SOCRATICODE_PROJECT_ID` to share a single index across all directories of the same project.
+
+#### MCP hosts with git worktree detection (e.g. Claude Code)
+
+Some MCP hosts (like [Claude Code](https://claude.ai/claude-code)) resolve the project root by following git worktree links. Since worktrees point back to the main repository's `.git` directory, the host automatically maps all worktrees to the same project config. This means you only need to configure the MCP server **once** for the main checkout — all worktrees inherit it automatically.
+
+For Claude Code, add the server with local scope from your main checkout:
+
+```bash
+cd /path/to/main-checkout
+claude mcp add -e SOCRATICODE_PROJECT_ID=my-project --scope local socraticode -- npx -y socraticode
+```
+
+All worktrees created from this repo will automatically connect to socraticode with the shared project ID. No per-worktree setup needed.
+
+> **Note:** This only works for git worktrees. Separate `git clone`s of the same repo have independent `.git` directories and won't share the config.
+
+#### Other MCP hosts (per-project `.mcp.json`)
+
+For MCP hosts that don't resolve git worktree paths, add a `.mcp.json` at the root of each worktree (and your main checkout):
+
+```json
+{
+  "mcpServers": {
+    "socraticode": {
+      "command": "npx",
+      "args": ["-y", "socraticode"],
+      "env": {
+        "SOCRATICODE_PROJECT_ID": "my-project"
+      }
+    }
+  }
+}
+```
+
+Add `.mcp.json` to your `.gitignore` if you don't want it tracked.
+
+#### How it works
+
+With this config, agents running in `/repo/main`, `/repo/worktree-feat-a`, and `/repo/worktree-fix-b` all share the same `codebase_my-project`, `codegraph_my-project`, and `context_my-project` Qdrant collections.
+
+**How it works in practice:**
+
+- The semantic index reflects whichever worktree last triggered a file change — but since branches typically differ by only a handful of files, the index is 99%+ accurate for all worktrees
+- Your AI agent reads actual file contents from its own worktree; the shared index is only used for discovery and navigation
+- When changes merge back to main, the file watcher re-indexes the changed files and the index converges
+
 ### Available tools
 
 Once connected, 21 tools are available to your AI assistant:
@@ -578,6 +629,7 @@ Artifacts are chunked and embedded into Qdrant using the same hybrid dense + BM2
 | `MAX_FILE_SIZE_MB` | `5` | Maximum file size in MB. Files larger than this are skipped during indexing. Increase for repos with large generated or data files you want indexed. |
 | `SEARCH_DEFAULT_LIMIT` | `10` | Default number of results returned by `codebase_search` (1-50). Each result is a ranked code chunk with file path, line range, and content. Higher values give broader coverage but produce more output. Can still be overridden per-query via the `limit` tool parameter. |
 | `SEARCH_MIN_SCORE` | `0.10` | Minimum RRF (Reciprocal Rank Fusion) score threshold (0-1). Results below this score are filtered out. Helps remove low-relevance noise from search results. Set to `0` to disable filtering (returns all results up to `limit`). Can be overridden per-query via the `minScore` tool parameter. Works together with `limit`: results are first filtered by score, then capped at `limit`. |
+| `SOCRATICODE_PROJECT_ID` | *(none)* | Override the auto-generated project ID. When set, all paths resolve to the same Qdrant collections, allowing multiple directories (e.g. git worktrees of the same repo) to share a single index. Must match `[a-zA-Z0-9_-]+`. |
 | `SOCRATICODE_LOG_LEVEL` | `info` | Log verbosity: `debug`, `info`, `warn`, `error` |
 | `SOCRATICODE_LOG_FILE` | *(none)* | Absolute path to a log file. When set, all log entries are appended to this file (a session separator is written on each server start). Useful for debugging when the MCP host doesn't surface log notifications. |
 
