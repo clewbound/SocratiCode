@@ -90,8 +90,9 @@ The first Qdrant‑based MCP/Claude Plugin/Skill that pairs auto‑managed, zero
 
 **Claude Code** — install the plugin (recommended, includes workflow skills for best results):
 
-```bash
-claude plugin add --from-github giancarloerra/socraticode
+```
+/plugin marketplace add giancarloerra/socraticode
+/plugin install socraticode@socraticode
 ```
 
 Or as MCP only (without skills):
@@ -296,8 +297,9 @@ before reading any files directly.
 
 The SocratiCode plugin bundles both the MCP server and workflow skills that teach Claude how to use the tools effectively. One install gives you everything:
 
-```bash
-claude plugin add --from-github giancarloerra/socraticode
+```
+/plugin marketplace add giancarloerra/socraticode
+/plugin install socraticode@socraticode
 ```
 
 The plugin includes:
