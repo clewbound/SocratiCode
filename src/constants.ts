@@ -30,6 +30,17 @@ export const QDRANT_MODE: "managed" | "external" =
 export const QDRANT_CONTAINER_NAME = "socraticode-qdrant";
 export const QDRANT_IMAGE = "qdrant/qdrant:v1.17.0";
 
+/**
+ * Resolve the Qdrant REST port from a URL.
+ * Returns the explicit port if present (e.g. `:8443`),
+ * otherwise `443` for `https://` or `6333` for `http://`.
+ */
+export function resolveQdrantPort(url: string): number {
+  const parsed = new URL(url);
+  if (parsed.port) return parseInt(parsed.port, 10);
+  return url.startsWith("https:") ? 443 : 6333;
+}
+
 // ── Ollama configuration ────────────────────────────────────────────────
 
 export const OLLAMA_PORT = parseInt(process.env.OLLAMA_PORT || "11435", 10);

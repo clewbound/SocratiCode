@@ -22,6 +22,7 @@ import {
   QDRANT_MODE,
   QDRANT_PORT,
   QDRANT_URL,
+  resolveQdrantPort,
   SEARCH_DEFAULT_LIMIT,
   SEARCH_MIN_SCORE,
   SPECIAL_FILES,
@@ -369,5 +370,28 @@ describe("constants", () => {
       const result = mergeExtraExtensions(undefined);
       expect(result.size).toBe(0);
     });
+  });
+});
+
+describe("resolveQdrantPort", () => {
+  it("returns explicit port from URL", () => {
+    expect(resolveQdrantPort("https://qdrant.example.com:6333")).toBe(6333);
+    expect(resolveQdrantPort("http://localhost:8080")).toBe(8080);
+    expect(resolveQdrantPort("https://my-qdrant.com:8443")).toBe(8443);
+  });
+
+  it("defaults to 443 for HTTPS URLs without explicit port", () => {
+    expect(resolveQdrantPort("https://qdrant.example.com")).toBe(443);
+    expect(resolveQdrantPort("https://my-tunnel.trycloudflare.com")).toBe(443);
+  });
+
+  it("defaults to 6333 for HTTP URLs without explicit port", () => {
+    expect(resolveQdrantPort("http://localhost")).toBe(6333);
+    expect(resolveQdrantPort("http://192.168.1.100")).toBe(6333);
+  });
+
+  it("handles URLs with paths and query strings", () => {
+    expect(resolveQdrantPort("https://qdrant.example.com:9999/some/path")).toBe(9999);
+    expect(resolveQdrantPort("https://qdrant.example.com/some/path")).toBe(443);
   });
 });

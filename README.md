@@ -712,7 +712,7 @@ Artifacts are chunked and embedded into Qdrant using the same hybrid dense + BM2
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `QDRANT_MODE` | `managed` | `managed` = Docker-managed local Qdrant (default). `external` = user-provided remote or cloud Qdrant (no Docker management). |
-| `QDRANT_URL` | *(none)* | Full URL of a remote/cloud Qdrant instance (e.g. `https://xyz.aws.cloud.qdrant.io:6333`). When set, takes precedence over `QDRANT_HOST` + `QDRANT_PORT`. Required (or set `QDRANT_HOST`) when `QDRANT_MODE=external`. |
+| `QDRANT_URL` | *(none)* | Full URL of a remote/cloud Qdrant instance (e.g. `https://xyz.aws.cloud.qdrant.io:6333`). When set, takes precedence over `QDRANT_HOST` + `QDRANT_PORT`. Port is auto-inferred from the URL: explicit port if present (e.g. `:8443`), otherwise `443` for `https://` or `6333` for `http://`. Required (or set `QDRANT_HOST`) when `QDRANT_MODE=external`. |
 | `QDRANT_PORT` | `16333` | Qdrant REST API port (managed mode, or external without `QDRANT_URL`) |
 | `QDRANT_GRPC_PORT` | `16334` | Qdrant gRPC port (managed mode only) |
 | `QDRANT_HOST` | `localhost` | Qdrant hostname (alternative to `QDRANT_URL` for non-HTTPS external instances) |
