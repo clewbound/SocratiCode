@@ -104,6 +104,8 @@ Or from within Claude Code:
 /plugin install socraticode@socraticode
 ```
 
+> **Auto-updates:** After installing, enable automatic updates by opening `/plugin` → Marketplaces → select `socraticode` → Enable auto-update.
+
 Or as MCP only (without skills):
 
 ```bash
@@ -327,6 +329,22 @@ The plugin includes:
 - **Explorer agent** — delegatable subagent for deep codebase analysis
 
 > If you previously installed SocratiCode as a standalone MCP (`claude mcp add socraticode`), remove it after installing the plugin to avoid duplicates: `claude mcp remove socraticode`
+
+**Auto-updates:** Third-party plugins don't auto-update by default. To enable automatic updates, open `/plugin` → Marketplaces → select `socraticode` → Enable auto-update. To update manually:
+
+From your shell:
+
+```bash
+claude plugin marketplace update socraticode
+claude plugin update socraticode@socraticode
+```
+
+Or from within Claude Code:
+
+```
+/plugin marketplace update socraticode
+/plugin update socraticode@socraticode
+```
 
 **Configuring environment variables:** SocratiCode works with zero config for most users (local Ollama + managed Qdrant). If you need cloud embeddings, a remote Qdrant, or other customization:
 
