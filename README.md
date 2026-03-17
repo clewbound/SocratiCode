@@ -161,7 +161,7 @@ I built SocratiCode because I regularly work on existing, large, and complex cod
 - **Live file watching** — Optionally watch for file changes and keep the index updated in real time (debounced 2s). Watcher also invalidates the code graph cache.
 - **Parallel processing** — Files are scanned and chunked in parallel batches (50 at a time) for fast I/O, while embedding generation and upserts are batched separately for optimal throughput.
 - **Multi-project** — Index multiple projects simultaneously. Each gets its own isolated collection with full project path tracking.
-- **Respects ignore rules** — Honors all `.gitignore` files (root + nested), plus an optional `.socraticodeignore` for additional exclusions. Includes sensible built-in defaults. `.gitignore` processing can be disabled via `RESPECT_GITIGNORE=false`.
+- **Respects ignore rules** — Honors all `.gitignore` files (root + nested), plus an optional `.socraticodeignore` for additional exclusions. Includes sensible built-in defaults. `.gitignore` processing can be disabled via `RESPECT_GITIGNORE=false`. Dot-directories (e.g. `.agent`) can be included via `INCLUDE_DOT_FILES=true`.
 - **Custom file extensions** — Projects with non-standard extensions (e.g. `.tpl`, `.blade`) can be included via `EXTRA_EXTENSIONS` env var or `extraExtensions` tool parameter. Works for both indexing and code graph.
 - **Configurable infrastructure** — All ports, hosts, and API keys are configurable via environment variables. Qdrant API key support for enterprise deployments.
 - **Auto-setup** — On first use, automatically checks Docker, pulls images, starts containers, and pulls the embedding model. Only prerequisite: Docker.
@@ -723,6 +723,7 @@ Artifacts are chunked and embedded into Qdrant using the same hybrid dense + BM2
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `RESPECT_GITIGNORE` | `true` | Set to `false` to skip `.gitignore` processing. Built-in defaults and `.socraticodeignore` still apply. |
+| `INCLUDE_DOT_FILES` | `false` | Set to `true` to include dot-directories (e.g. `.agent`, `.config`) in indexing. By default, directories and files starting with `.` are excluded. Useful for projects where important code lives in dot-directories. |
 | `EXTRA_EXTENSIONS` | *(none)* | Comma-separated list of additional file extensions to scan (e.g. `.tpl,.blade,.hbs`). Applies to both indexing and code graph. Files with extra extensions are indexed as plaintext and appear as leaf nodes in the code graph. Can also be passed per-operation via the `extraExtensions` tool parameter. |
 | `MAX_FILE_SIZE_MB` | `5` | Maximum file size in MB. Files larger than this are skipped during indexing. Increase for repos with large generated or data files you want indexed. |
 | `SEARCH_DEFAULT_LIMIT` | `10` | Default number of results returned by `codebase_search` (1-50). Each result is a ranked code chunk with file path, line range, and content. Higher values give broader coverage but produce more output. Can still be overridden per-query via the `limit` tool parameter. |
