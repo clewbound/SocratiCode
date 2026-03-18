@@ -615,7 +615,7 @@ export async function getIndexableFiles(
   const allFiles = await glob("**/*", {
     cwd: projectPath,
     nodir: true,
-    dot: false,
+    dot: (process.env.INCLUDE_DOT_FILES ?? "false").toLowerCase() === "true",
     absolute: false,
   });
 

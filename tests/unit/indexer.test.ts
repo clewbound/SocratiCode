@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 Giancarlo Erra - Altaire Limited
-import { beforeAll, describe, expect, it } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { CHUNK_SIZE, MAX_CHUNK_CHARS } from "../../src/constants.js";
 import { ensureDynamicLanguages } from "../../src/services/code-graph.js";
-import { chunkFileContent, chunkId, hashContent, isIndexableFile } from "../../src/services/indexer.js";
+import { chunkFileContent, chunkId, getIndexableFiles, hashContent, isIndexableFile } from "../../src/services/indexer.js";
 
 // Register dynamic language grammars once for AST-aware chunking tests
 beforeAll(() => {
@@ -283,6 +286,71 @@ describe("indexer utilities", () => {
       // Every chunk must be within MAX_CHUNK_CHARS
       for (const chunk of chunks) {
         expect(chunk.content.length).toBeLessThanOrEqual(MAX_CHUNK_CHARS);
+      }
+    });
+  });
+
+  // ── getIndexableFiles (INCLUDE_DOT_FILES) ─────────────────────────────
+
+  describe("getIndexableFiles", () => {
+    let tmpDir: string;
+
+    beforeAll(() => {
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "socraticode-dotfiles-test-"));
+
+      // Regular file
+      fs.mkdirSync(path.join(tmpDir, "src"), { recursive: true });
+      fs.writeFileSync(path.join(tmpDir, "src", "index.ts"), "export const x = 1;\n");
+
+      // Dot-directory with an indexable file
+      fs.mkdirSync(path.join(tmpDir, ".agent", "rules"), { recursive: true });
+      fs.writeFileSync(path.join(tmpDir, ".agent", "rules", "config.ts"), "export const rule = true;\n");
+
+      // Dot-file at root (e.g. .gitignore)
+      fs.writeFileSync(path.join(tmpDir, ".gitignore"), "node_modules/\n");
+    });
+
+    afterAll(() => {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    it("excludes dot-directory files by default", async () => {
+      const files = await getIndexableFiles(tmpDir);
+      const hasDotDir = files.some((f) => f.includes(".agent"));
+      expect(hasDotDir).toBe(false);
+    });
+
+    it("includes dot-directory files when INCLUDE_DOT_FILES=true", async () => {
+      vi.stubEnv("INCLUDE_DOT_FILES", "true");
+      try {
+        const files = await getIndexableFiles(tmpDir);
+        const dotFiles = files.filter((f) => f.includes(".agent"));
+        expect(dotFiles.length).toBeGreaterThan(0);
+        expect(dotFiles.some((f) => f.includes("config.ts"))).toBe(true);
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it("treats INCLUDE_DOT_FILES case-insensitively", async () => {
+      vi.stubEnv("INCLUDE_DOT_FILES", "True");
+      try {
+        const files = await getIndexableFiles(tmpDir);
+        const hasDotDir = files.some((f) => f.includes(".agent"));
+        expect(hasDotDir).toBe(true);
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it("excludes dot-directory files for non-true values", async () => {
+      vi.stubEnv("INCLUDE_DOT_FILES", "yes");
+      try {
+        const files = await getIndexableFiles(tmpDir);
+        const hasDotDir = files.some((f) => f.includes(".agent"));
+        expect(hasDotDir).toBe(false);
+      } finally {
+        vi.unstubAllEnvs();
       }
     });
   });
