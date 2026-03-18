@@ -2,7 +2,7 @@
 // Copyright (C) 2026 Giancarlo Erra - Altaire Limited
 import { createHash } from "node:crypto";
 import { QdrantClient } from "@qdrant/js-client-rest";
-import { QDRANT_API_KEY, QDRANT_HOST, QDRANT_PORT, QDRANT_URL } from "../constants.js";
+import { QDRANT_API_KEY, QDRANT_HOST, QDRANT_PORT, QDRANT_URL, resolveQdrantPort } from "../constants.js";
 import type { ArtifactIndexState, CodeGraph, FileChunk, SearchResult } from "../types.js";
 import { getEmbeddingConfig } from "./embedding-config.js";
 import { generateEmbeddings, generateQueryEmbedding, prepareDocumentText } from "./embeddings.js";
@@ -43,6 +43,7 @@ function getClient(): QdrantClient {
       QDRANT_URL
         ? {
             url: QDRANT_URL,
+            port: resolveQdrantPort(QDRANT_URL),
             ...(QDRANT_API_KEY ? { apiKey: QDRANT_API_KEY } : {}),
             checkCompatibility: false,
           }
