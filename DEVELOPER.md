@@ -194,8 +194,9 @@ src/
 │   ├── logger.ts            # Structured JSON logging — stderr (startup/no MCP transport) or MCP notifications/message (when hosted)
 │   ├── code-graph.ts        # AST-based code graph building via ast-grep
 │   ├── graph-analysis.ts    # Graph queries: dependencies, stats, cycles, Mermaid diagrams
+│   ├── graph-aliases.ts     # Path alias resolution from tsconfig/jsconfig compilerOptions.paths
 │   ├── graph-imports.ts     # Import/require/use extraction for 18+ languages via AST
-│   ├── graph-resolution.ts  # Module specifier → file path resolution
+│   ├── graph-resolution.ts  # Module specifier → file path resolution (incl. aliases, SCSS partials)
 │   ├── startup.ts           # Startup lifecycle: auto-resume, graceful shutdown coordination
 │   └── context-artifacts.ts # Context artifact loading, chunking, indexing, search
 │
@@ -458,14 +459,24 @@ When `codebase_graph_build` is called:
    │   ├── Swift: import
    │   ├── Bash: source, . (dot)
    │   ├── Dart/Lua: regex-based extraction
-   │   └── Svelte/Vue: HTML parse → <script> extraction → re-parse as TypeScript
+   │   ├── Svelte/Vue: HTML parse → <script> extraction → re-parse as TypeScript
+   │   ├── Svelte/Vue: HTML parse → <style> extraction → CSS @import/@require regex
+   │   └── CSS/SCSS/SASS/LESS: @import/@import url()/@require regex extraction
+   ├── Tag CSS imports with isCssImport flag (for correct resolution extensions)
    ├── Update progress: filesProcessed++
    └── Return ImportInfo[] with module specifiers
 
 4. RESOLVE IMPORTS
+   ├── Load path aliases from tsconfig.json/jsconfig.json (once per build)
+   │   ├── Parse compilerOptions.paths + baseUrl
+   │   ├── Follow "extends" chains (up to 10 levels, circular-safe)
+   │   └── Fall back to jsconfig.json if tsconfig has no paths
    ├── For each import, resolve module specifier to actual file path
    ├── Handle relative paths: ./foo → foo.ts, foo/index.ts, etc.
-   ├── Try extension variations per language
+   ├── Try path alias resolution: $lib/foo → src/lib/foo.ts, @/bar → src/bar.ts
+   ├── Try extension variations per language (JS/TS extensions or CSS extensions)
+   ├── SCSS partial resolution: @import "vars" → _vars.scss
+   ├── CSS imports from <style> blocks → resolved with CSS extensions (.css/.scss/.sass/.less/.styl)
    ├── Check against known file set for existence
    └── Skip unresolvable imports (external packages, built-ins)
 
