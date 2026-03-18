@@ -39,7 +39,8 @@ export function resolveImport(
     case "css":
     case "scss":
     case "sass":
-    case "less": {
+    case "less":
+    case "stylus": {
       const cssExtensions = [".css", ".scss", ".sass", ".less", ".styl"];
       // CSS @import: ./variables.css, ../mixins.scss
       if (moduleSpecifier.startsWith(".")) {

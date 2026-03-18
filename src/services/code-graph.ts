@@ -314,7 +314,7 @@ export function getAstGrepLang(ext: string): Lang | string | null {
     ".ts": Lang.TypeScript,
     ".tsx": Lang.Tsx,
     ".html": Lang.Html, ".htm": Lang.Html,
-    ".css": Lang.Css, ".scss": Lang.Css, ".sass": Lang.Css, ".less": Lang.Css,
+    ".css": Lang.Css, ".scss": Lang.Css, ".sass": Lang.Css, ".less": Lang.Css, ".styl": Lang.Css,
   };
   return map[ext] ?? null;
 }
