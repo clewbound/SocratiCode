@@ -602,15 +602,17 @@ SocratiCode supports languages at three levels:
 
 ### Full Support (indexing + code graph + AST chunking)
 
-JavaScript, TypeScript, TSX, Python, Java, Kotlin, Scala, C, C++, C#, Go, Rust, Ruby, PHP, Swift, Bash/Shell, HTML, CSS/SCSS
+JavaScript, TypeScript, TSX, Python, Java, Kotlin, Scala, C, C++, C#, Go, Rust, Ruby, PHP, Swift, Bash/Shell, HTML, CSS/SCSS, Svelte, Vue
+
+Svelte and Vue: imports extracted from `<script>` blocks (re-parsed as TypeScript) and CSS `@import`/`@require` from `<style>` blocks (any combination of `lang`, `scoped`, `module`, `global` attributes). Path aliases from `tsconfig.json`/`jsconfig.json` `compilerOptions.paths` are resolved (including `extends` chains). SCSS partial resolution (`_` prefix convention) is supported.
 
 ### Code Graph via Regex + Indexing
 
-Dart (import/export/part), Lua (require/dofile/loadfile)
+Dart (import/export/part), Lua (require/dofile/loadfile), SASS, LESS (CSS `@import` extraction)
 
 ### Indexing Only (hybrid search, line-based chunking)
 
-Vue, Svelte, SASS, LESS, JSON, YAML, TOML, XML, INI/CFG, Markdown/MDX, RST, SQL, R, Dockerfile, TXT, and any file matching a supported extension or special filename (Dockerfile, Makefile, Gemfile, Rakefile, etc.)
+JSON, YAML, TOML, XML, INI/CFG, Markdown/MDX, RST, SQL, R, Dockerfile, TXT, and any file matching a supported extension or special filename (Dockerfile, Makefile, Gemfile, Rakefile, etc.)
 
 **54 file extensions** + 8 special filenames supported out of the box.
 
