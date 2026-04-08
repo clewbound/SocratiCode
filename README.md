@@ -177,6 +177,8 @@ I built SocratiCode because I regularly work on existing, large, and complex cod
 - **Live file watching** — Optionally watch for file changes and keep the index updated in real time (debounced 2s). Watcher also invalidates the code graph cache.
 - **Parallel processing** — Files are scanned and chunked in parallel batches (50 at a time) for fast I/O, while embedding generation and upserts are batched separately for optimal throughput.
 - **Multi-project** — Index multiple projects simultaneously. Each gets its own isolated collection with full project path tracking.
+- **Cross-project search** — Search across multiple related projects in a single query. Link projects via `.socraticode.json` or the `SOCRATICODE_LINKED_PROJECTS` env var, then set `includeLinked: true` on `codebase_search`. Results are tagged with project labels and deduplicated via client-side RRF fusion.
+- **Branch-aware indexing** — Maintain separate indexes per git branch by setting `SOCRATICODE_BRANCH_AWARE=true`. Each branch gets its own Qdrant collections, so switching branches instantly switches to the correct index. Ideal for CI/CD pipelines and PR review workflows.
 - **Respects ignore rules** — Honors all `.gitignore` files (root + nested), plus an optional `.socraticodeignore` for additional exclusions. Includes sensible built-in defaults. `.gitignore` processing can be disabled via `RESPECT_GITIGNORE=false`. Dot-directories (e.g. `.agent`) can be included via `INCLUDE_DOT_FILES=true`.
 - **Custom file extensions** — Projects with non-standard extensions (e.g. `.tpl`, `.blade`) can be included via `EXTRA_EXTENSIONS` env var or `extraExtensions` tool parameter. Works for both indexing and code graph.
 - **Configurable infrastructure** — All ports, hosts, and API keys are configurable via environment variables. Qdrant API key support for enterprise deployments.
@@ -560,6 +562,64 @@ With this config, agents running in `/repo/main`, `/repo/worktree-feat-a`, and `
 - Your AI agent reads actual file contents from its own worktree; the shared index is only used for discovery and navigation
 - When changes merge back to main, the file watcher re-indexes the changed files and the index converges
 
+### Cross-Project Search (linked projects)
+
+If you work across multiple related repositories or packages, you can search them all in a single query.
+
+#### Configuration
+
+Create a `.socraticode.json` file in your project root:
+
+```json
+{
+  "linkedProjects": [
+    "../shared-lib",
+    "/absolute/path/to/other-project"
+  ]
+}
+```
+
+Or set the `SOCRATICODE_LINKED_PROJECTS` environment variable (comma-separated paths):
+
+```bash
+SOCRATICODE_LINKED_PROJECTS="../shared-lib,/absolute/path/to/other-project"
+```
+
+Both sources are merged and deduplicated. Relative paths are resolved from the project root. Non-existent paths are silently skipped.
+
+#### Usage
+
+Pass `includeLinked: true` to `codebase_search`:
+
+> Search for "authentication middleware" with includeLinked: true
+
+Results are tagged with `[project-name]` labels showing which project each result came from. The current project always has highest priority for deduplication — if the same file exists in multiple linked projects, the current project's version wins.
+
+> **Note:** Each linked project must be independently indexed (`codebase_index`) before it can be searched.
+
+### Branch-Aware Indexing
+
+By default, all branches of a project share the same index. When you switch branches, changed files are re-indexed by the watcher, and the index reflects the current branch state.
+
+For workflows where you need **separate, persistent indexes per branch** — such as CI/CD pipelines or comparing code across branches — enable branch-aware mode:
+
+```bash
+SOCRATICODE_BRANCH_AWARE=true
+```
+
+With this enabled, collection names include the branch name (e.g. `codebase_abc123__main`, `codebase_abc123__feat_my-feature`). Each branch maintains its own independent index, code graph, and context artifacts.
+
+**When to use:**
+- CI/CD pipelines that index each branch/PR separately
+- Comparing search results across branches
+- Keeping a pristine `main` index unaffected by feature branch changes
+
+**When NOT to use:**
+- Local development with frequent branch switching (default shared index is more efficient)
+- Projects tracked via `SOCRATICODE_PROJECT_ID` (explicit IDs bypass branch detection)
+
+> **How it works:** `projectIdFromPath()` detects the current git branch via `git rev-parse --abbrev-ref HEAD` and appends a sanitized branch suffix (e.g. `feat/my-feature` → `feat_my-feature`) to the hash-based project ID. Detached HEAD states fall back to the branchless ID.
+
 ### Available tools
 
 Once connected, 21 tools are available to your AI assistant:
@@ -578,7 +638,7 @@ Once connected, 21 tools are available to your AI assistant:
 
 | Tool | Description |
 |------|-------------|
-| `codebase_search` | Hybrid semantic + keyword search (dense + BM25, RRF-fused) with optional file path and language filters |
+| `codebase_search` | Hybrid semantic + keyword search (dense + BM25, RRF-fused) with optional file path, language filters, and cross-project search (`includeLinked`) |
 | `codebase_status` | Check index status and chunk count |
 
 #### Code Graph
@@ -747,6 +807,8 @@ Artifacts are chunked and embedded into Qdrant using the same hybrid dense + BM2
 | `SEARCH_DEFAULT_LIMIT` | `10` | Default number of results returned by `codebase_search` (1-50). Each result is a ranked code chunk with file path, line range, and content. Higher values give broader coverage but produce more output. Can still be overridden per-query via the `limit` tool parameter. |
 | `SEARCH_MIN_SCORE` | `0.10` | Minimum RRF (Reciprocal Rank Fusion) score threshold (0-1). Results below this score are filtered out. Helps remove low-relevance noise from search results. Set to `0` to disable filtering (returns all results up to `limit`). Can be overridden per-query via the `minScore` tool parameter. Works together with `limit`: results are first filtered by score, then capped at `limit`. |
 | `SOCRATICODE_PROJECT_ID` | *(none)* | Override the auto-generated project ID. When set, all paths resolve to the same Qdrant collections, allowing multiple directories (e.g. git worktrees of the same repo) to share a single index. Must match `[a-zA-Z0-9_-]+`. |
+| `SOCRATICODE_BRANCH_AWARE` | `false` | When `true`, append the current git branch name to the project ID, creating separate Qdrant collections per branch. Ignored when `SOCRATICODE_PROJECT_ID` is set. |
+| `SOCRATICODE_LINKED_PROJECTS` | *(none)* | Comma-separated list of additional project paths to include in cross-project search. Merged with paths from `.socraticode.json`. Non-existent paths are silently skipped. |
 | `SOCRATICODE_LOG_LEVEL` | `info` | Log verbosity: `debug`, `info`, `warn`, `error` |
 | `SOCRATICODE_LOG_FILE` | *(none)* | Absolute path to a log file. When set, all log entries are appended to this file (a session separator is written on each server start). Useful for debugging when the MCP host doesn't surface log notifications. |
 
