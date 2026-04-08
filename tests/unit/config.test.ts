@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 Giancarlo Erra - Altaire Limited
-import { afterEach, describe, expect, it } from "vitest";
-import { collectionName, contextCollectionName, graphCollectionName, projectIdFromPath } from "../../src/config.js";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { collectionName, contextCollectionName, graphCollectionName, loadLinkedProjects, projectIdFromPath, resolveLinkedCollections } from "../../src/config.js";
 
 describe("config", () => {
   // Clean up env override between tests
@@ -133,6 +136,145 @@ describe("config", () => {
       const contextColl = contextCollectionName(projectId);
       expect(contextColl).toMatch(/^[a-zA-Z0-9_-]+$/);
       expect(contextColl).toMatch(/^context_[0-9a-f]{12}$/);
+    });
+  });
+
+  // ── Linked projects ─────────────────────────────────────────────────
+
+  describe("loadLinkedProjects", () => {
+    let tmpDir: string;
+    let projectDir: string;
+    let linkedDirA: string;
+    let linkedDirB: string;
+    const originalLinkedEnv = process.env.SOCRATICODE_LINKED_PROJECTS;
+
+    beforeEach(() => {
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "socraticode-test-"));
+      projectDir = path.join(tmpDir, "my-project");
+      linkedDirA = path.join(tmpDir, "linked-a");
+      linkedDirB = path.join(tmpDir, "linked-b");
+      fs.mkdirSync(projectDir, { recursive: true });
+      fs.mkdirSync(linkedDirA, { recursive: true });
+      fs.mkdirSync(linkedDirB, { recursive: true });
+      delete process.env.SOCRATICODE_LINKED_PROJECTS;
+    });
+
+    afterEach(() => {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+      if (originalLinkedEnv === undefined) {
+        delete process.env.SOCRATICODE_LINKED_PROJECTS;
+      } else {
+        process.env.SOCRATICODE_LINKED_PROJECTS = originalLinkedEnv;
+      }
+    });
+
+    it("returns empty array when no .socraticode.json exists", () => {
+      expect(loadLinkedProjects(projectDir)).toEqual([]);
+    });
+
+    it("reads linked projects from .socraticode.json", () => {
+      fs.writeFileSync(
+        path.join(projectDir, ".socraticode.json"),
+        JSON.stringify({ linkedProjects: ["../linked-a", "../linked-b"] }),
+      );
+      const result = loadLinkedProjects(projectDir);
+      expect(result).toHaveLength(2);
+      expect(result).toContain(linkedDirA);
+      expect(result).toContain(linkedDirB);
+    });
+
+    it("skips non-existent linked paths", () => {
+      fs.writeFileSync(
+        path.join(projectDir, ".socraticode.json"),
+        JSON.stringify({ linkedProjects: ["../linked-a", "../does-not-exist"] }),
+      );
+      const result = loadLinkedProjects(projectDir);
+      expect(result).toHaveLength(1);
+      expect(result).toContain(linkedDirA);
+    });
+
+    it("skips self-references", () => {
+      fs.writeFileSync(
+        path.join(projectDir, ".socraticode.json"),
+        JSON.stringify({ linkedProjects: [".", "../my-project"] }),
+      );
+      expect(loadLinkedProjects(projectDir)).toEqual([]);
+    });
+
+    it("reads from SOCRATICODE_LINKED_PROJECTS env var", () => {
+      process.env.SOCRATICODE_LINKED_PROJECTS = `${linkedDirA},${linkedDirB}`;
+      const result = loadLinkedProjects(projectDir);
+      expect(result).toHaveLength(2);
+      expect(result).toContain(linkedDirA);
+      expect(result).toContain(linkedDirB);
+    });
+
+    it("merges config file and env var without duplicates", () => {
+      fs.writeFileSync(
+        path.join(projectDir, ".socraticode.json"),
+        JSON.stringify({ linkedProjects: ["../linked-a"] }),
+      );
+      process.env.SOCRATICODE_LINKED_PROJECTS = `${linkedDirA},${linkedDirB}`;
+      const result = loadLinkedProjects(projectDir);
+      // linked-a appears in both sources but should be deduplicated
+      expect(result).toHaveLength(2);
+      expect(result).toContain(linkedDirA);
+      expect(result).toContain(linkedDirB);
+    });
+
+    it("handles malformed .socraticode.json gracefully", () => {
+      fs.writeFileSync(path.join(projectDir, ".socraticode.json"), "not valid json{{{");
+      expect(loadLinkedProjects(projectDir)).toEqual([]);
+    });
+
+    it("handles .socraticode.json with missing linkedProjects field", () => {
+      fs.writeFileSync(
+        path.join(projectDir, ".socraticode.json"),
+        JSON.stringify({ someOtherField: true }),
+      );
+      expect(loadLinkedProjects(projectDir)).toEqual([]);
+    });
+  });
+
+  describe("resolveLinkedCollections", () => {
+    let tmpDir: string;
+    let projectDir: string;
+    let linkedDir: string;
+
+    beforeEach(() => {
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "socraticode-test-"));
+      projectDir = path.join(tmpDir, "main-project");
+      linkedDir = path.join(tmpDir, "linked-lib");
+      fs.mkdirSync(projectDir, { recursive: true });
+      fs.mkdirSync(linkedDir, { recursive: true });
+      delete process.env.SOCRATICODE_LINKED_PROJECTS;
+      delete process.env.SOCRATICODE_PROJECT_ID;
+    });
+
+    afterEach(() => {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+      delete process.env.SOCRATICODE_LINKED_PROJECTS;
+    });
+
+    it("returns only current project when no links configured", () => {
+      const collections = resolveLinkedCollections(projectDir);
+      expect(collections).toHaveLength(1);
+      expect(collections[0].label).toBe("main-project");
+      expect(collections[0].name).toMatch(/^codebase_/);
+    });
+
+    it("returns current + linked collections with correct labels", () => {
+      fs.writeFileSync(
+        path.join(projectDir, ".socraticode.json"),
+        JSON.stringify({ linkedProjects: ["../linked-lib"] }),
+      );
+      const collections = resolveLinkedCollections(projectDir);
+      expect(collections).toHaveLength(2);
+      // Current project is first (highest priority)
+      expect(collections[0].label).toBe("main-project");
+      expect(collections[1].label).toBe("linked-lib");
+      // Different collection names
+      expect(collections[0].name).not.toBe(collections[1].name);
     });
   });
 });
