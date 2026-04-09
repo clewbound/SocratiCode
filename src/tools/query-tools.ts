@@ -14,6 +14,7 @@ import { getLockHolderPid, } from "../services/lock.js";
 import { ensureOllamaReady } from "../services/ollama.js";
 import { getCollectionInfo, getProjectMetadata, searchChunks, searchMultipleCollections } from "../services/qdrant.js";
 import { ensureWatcherStarted, isWatchedByAnyProcess, isWatching } from "../services/watcher.js";
+import type { SearchResult } from "../types.js";
 
 /** Format an IndexingProgress into display lines (elapsed, progress, batches, graph). */
 function formatProgressLines(progress: IndexingProgress): {
@@ -73,7 +74,7 @@ export async function handleQueryTool(
       const languageFilter = args.languageFilter as string | undefined;
       const includeLinked = args.includeLinked as boolean | undefined;
 
-      let allResults;
+      let allResults: SearchResult[];
       if (includeLinked) {
         const collections = resolveLinkedCollections(resolvedPath);
         allResults = await searchMultipleCollections(collections, query, limit, fileFilter, languageFilter);

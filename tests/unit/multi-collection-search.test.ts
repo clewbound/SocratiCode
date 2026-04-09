@@ -8,8 +8,8 @@
  */
 
 import { describe, expect, it } from "vitest";
-import type { SearchResult } from "../../src/types.js";
 import { mergeMultiCollectionResults } from "../../src/services/qdrant.js";
+import type { SearchResult } from "../../src/types.js";
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
