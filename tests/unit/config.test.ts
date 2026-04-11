@@ -247,6 +247,8 @@ describe("config", () => {
     let tmpDir: string;
     let projectDir: string;
     let linkedDir: string;
+    const savedLinkedEnv = process.env.SOCRATICODE_LINKED_PROJECTS;
+    const savedProjectIdEnv = process.env.SOCRATICODE_PROJECT_ID;
 
     beforeEach(() => {
       tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "socraticode-test-"));
@@ -260,7 +262,16 @@ describe("config", () => {
 
     afterEach(() => {
       fs.rmSync(tmpDir, { recursive: true, force: true });
-      delete process.env.SOCRATICODE_LINKED_PROJECTS;
+      if (savedLinkedEnv === undefined) {
+        delete process.env.SOCRATICODE_LINKED_PROJECTS;
+      } else {
+        process.env.SOCRATICODE_LINKED_PROJECTS = savedLinkedEnv;
+      }
+      if (savedProjectIdEnv === undefined) {
+        delete process.env.SOCRATICODE_PROJECT_ID;
+      } else {
+        process.env.SOCRATICODE_PROJECT_ID = savedProjectIdEnv;
+      }
     });
 
     it("returns only current project when no links configured", () => {
@@ -344,14 +355,19 @@ describe("config", () => {
     });
   });
 
-  const gitEnv = { ...process.env, GIT_AUTHOR_NAME: "test", GIT_AUTHOR_EMAIL: "test@test.com", GIT_COMMITTER_NAME: "test", GIT_COMMITTER_EMAIL: "test@test.com" };
+  /** Create a temporary git repo with a named branch and initial commit. */
+  function initTempRepo(tmpDir: string, branch: string): void {
+    execFileSync("git", ["init", "-b", branch, tmpDir]);
+    execFileSync("git", ["config", "user.name", "test"], { cwd: tmpDir });
+    execFileSync("git", ["config", "user.email", "test@test.com"], { cwd: tmpDir });
+    execFileSync("git", ["commit", "--allow-empty", "-m", "init"], { cwd: tmpDir });
+  }
 
   describe("detectGitBranch", () => {
     it("detects a branch in a git repo", () => {
       const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "socraticode-git-"));
       try {
-        execFileSync("git", ["init", "-b", "test-branch", tmpDir]);
-        execFileSync("git", ["commit", "--allow-empty", "-m", "init"], { cwd: tmpDir, env: gitEnv });
+        initTempRepo(tmpDir, "test-branch");
         const branch = detectGitBranch(tmpDir);
         expect(branch).toBe("test-branch");
       } finally {
@@ -379,8 +395,7 @@ describe("config", () => {
     it("appends branch suffix when SOCRATICODE_BRANCH_AWARE=true", () => {
       const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "socraticode-braware-"));
       try {
-        execFileSync("git", ["init", "-b", "my-feature", tmpDir]);
-        execFileSync("git", ["commit", "--allow-empty", "-m", "init"], { cwd: tmpDir, env: gitEnv });
+        initTempRepo(tmpDir, "my-feature");
         process.env.SOCRATICODE_BRANCH_AWARE = "true";
         const id = projectIdFromPath(tmpDir);
         expect(id).toContain("__");
@@ -395,8 +410,7 @@ describe("config", () => {
     it("produces valid Qdrant collection names with branch suffix", () => {
       const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "socraticode-braware-"));
       try {
-        execFileSync("git", ["init", "-b", "feat/some-branch", tmpDir]);
-        execFileSync("git", ["commit", "--allow-empty", "-m", "init"], { cwd: tmpDir, env: gitEnv });
+        initTempRepo(tmpDir, "feat/some-branch");
         process.env.SOCRATICODE_BRANCH_AWARE = "true";
         const id = projectIdFromPath(tmpDir);
         const coll = collectionName(id);

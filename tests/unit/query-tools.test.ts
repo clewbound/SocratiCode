@@ -64,8 +64,10 @@ vi.mock("../../src/services/docker.js", () => ({
 
 // ── qdrant.js mock ───────────────────────────────────────────────────────
 
-const mockSearchChunks = vi.fn(async (_collection: string, _query: string, _limit: number) => []);
-const mockSearchMultipleCollections = vi.fn(async () => []);
+import type { SearchResult } from "../../src/types.js";
+
+const mockSearchChunks = vi.fn(async (_collection: string, _query: string, _limit: number): Promise<SearchResult[]> => []);
+const mockSearchMultipleCollections = vi.fn(async (): Promise<SearchResult[]> => []);
 
 vi.mock("../../src/services/qdrant.js", () => ({
   searchChunks: (...args: unknown[]) => mockSearchChunks(...(args as [string, string, number])),
