@@ -67,7 +67,10 @@ export function projectIdFromPath(folderPath: string): string {
   if (process.env.SOCRATICODE_BRANCH_AWARE === "true") {
     const branch = detectGitBranch(path.resolve(folderPath));
     if (branch) {
-      id = `${id}__${sanitizeBranchName(branch)}`;
+      const sanitized = sanitizeBranchName(branch);
+      if (sanitized) {
+        id = `${id}__${sanitized}`;
+      }
     }
   }
 
@@ -173,6 +176,7 @@ export function resolveLinkedCollections(
 ): Array<{ name: string; label: string }> {
   const resolvedRoot = path.resolve(projectPath);
   const currentId = projectIdFromPath(resolvedRoot);
+  const currentCoreId = coreProjectId(resolvedRoot);
   const collections: Array<{ name: string; label: string }> = [
     { name: collectionName(currentId), label: path.basename(resolvedRoot) },
   ];
@@ -182,8 +186,8 @@ export function resolveLinkedCollections(
     // Use base hash (no branch suffix) — linked projects are resolved by their
     // standard collection name regardless of SOCRATICODE_BRANCH_AWARE.
     const linkedId = coreProjectId(linkedPath);
-    // Skip if same base project (e.g. worktrees sharing SOCRATICODE_PROJECT_ID)
-    if (collectionName(linkedId) === collections[0].name) continue;
+    // Skip if same base project (e.g. worktrees sharing the same path hash)
+    if (linkedId === currentCoreId) continue;
     collections.push({
       name: collectionName(linkedId),
       label: path.basename(linkedPath),

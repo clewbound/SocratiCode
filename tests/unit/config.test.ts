@@ -353,6 +353,12 @@ describe("config", () => {
     it("replaces special characters", () => {
       expect(sanitizeBranchName("feat@v2.0")).toBe("feat_v2_0");
     });
+
+    it("returns empty string when all characters are invalid", () => {
+      expect(sanitizeBranchName("///")).toBe("");
+      expect(sanitizeBranchName("@@@")).toBe("");
+      expect(sanitizeBranchName("...")).toBe("");
+    });
   });
 
   /** Create a temporary git repo with a named branch and initial commit. */

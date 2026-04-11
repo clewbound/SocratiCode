@@ -88,7 +88,7 @@ describe("mergeMultiCollectionResults", () => {
     expect(results.find((r) => r.relativePath === "src/file3.ts")?.project).toBe("project-b");
   });
 
-  it("deduplicates by relativePath — first (higher-priority) collection wins", () => {
+  it("keeps same relativePath from different projects as separate entries", () => {
     const results = mergeMultiCollectionResults(
       [
         {
@@ -103,13 +103,35 @@ describe("mergeMultiCollectionResults", () => {
       10,
     );
 
+    // Dedupe key is label::relativePath, so same file in different projects stays separate
     const sharedResults = results.filter((r) => r.relativePath === "src/shared.ts");
-    expect(sharedResults).toHaveLength(1);
-    expect(sharedResults[0].content).toBe("content from A");
-    expect(sharedResults[0].project).toBe("project-a");
+    expect(sharedResults).toHaveLength(2);
+    expect(sharedResults.map((r) => r.project)).toEqual(
+      expect.arrayContaining(["project-a", "project-b"]),
+    );
   });
 
-  it("RRF scores accumulate for files appearing in multiple collections", () => {
+  it("deduplicates same relativePath within the same project", () => {
+    const results = mergeMultiCollectionResults(
+      [
+        {
+          label: "project-a",
+          results: [
+            makeResult("src/shared.ts", 0.90, { content: "first chunk" }),
+            makeResult("src/shared.ts", 0.80, { content: "second chunk" }),
+          ],
+        },
+      ],
+      10,
+    );
+
+    // Same label + same relativePath → deduplicated, first (higher-ranked) wins
+    const sharedResults = results.filter((r) => r.relativePath === "src/shared.ts");
+    expect(sharedResults).toHaveLength(1);
+    expect(sharedResults[0].content).toBe("first chunk");
+  });
+
+  it("same relativePath from different projects has independent RRF scores", () => {
     const results = mergeMultiCollectionResults(
       [
         {
@@ -130,13 +152,17 @@ describe("mergeMultiCollectionResults", () => {
       10,
     );
 
-    // popular.ts should rank first due to accumulated RRF score from both collections
-    expect(results[0].relativePath).toBe("src/popular.ts");
-    // Its score should be higher than single-collection results
-    expect(results[0].score).toBeGreaterThan(results[1].score);
-    // The accumulated score = 1/(60+1) + 1/(60+1) = 2 * 1/61 ≈ 0.0328
-    const expectedAccumulated = 2 * (1 / 61);
-    expect(results[0].score).toBeCloseTo(expectedAccumulated, 6);
+    // With label-scoped keys, src/popular.ts from A and B are separate entries
+    const popularResults = results.filter((r) => r.relativePath === "src/popular.ts");
+    expect(popularResults).toHaveLength(2);
+
+    // Each has a single-collection RRF score: 1/(60+rank)
+    // project-a's popular.ts is rank 1 → 1/61
+    // project-b's popular.ts is rank 1 → 1/61
+    const expectedSingle = 1 / 61;
+    for (const r of popularResults) {
+      expect(r.score).toBeCloseTo(expectedSingle, 6);
+    }
   });
 
   it("respects the limit parameter", () => {

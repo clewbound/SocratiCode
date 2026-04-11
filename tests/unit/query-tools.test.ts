@@ -7,6 +7,7 @@
  * provider, and uses getEmbeddingProvider() for OpenAI/Google.
  */
 
+import path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // ── Mocks ────────────────────────────────────────────────────────────────
@@ -245,7 +246,7 @@ describe("codebase_search — includeLinked parameter", () => {
     });
 
     expect(mockResolveLinkedCollections).toHaveBeenCalledWith(
-      expect.stringContaining(TEST_PATH),
+      expect.stringContaining(path.resolve(TEST_PATH)),
     );
     expect(mockSearchMultipleCollections).toHaveBeenCalledWith(
       [

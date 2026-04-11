@@ -309,8 +309,21 @@ export async function searchChunks(
   fileFilter?: string,
   languageFilter?: string,
 ): Promise<SearchResult[]> {
-  const qdrant = getClient();
   const queryVector = await generateQueryEmbedding(query);
+  return searchChunksWithVector(collectionName, query, queryVector, limit, fileFilter, languageFilter);
+}
+
+/** Internal: hybrid search using a pre-computed dense embedding vector.
+ * Avoids recomputing the same embedding when querying multiple collections. */
+async function searchChunksWithVector(
+  collectionName: string,
+  query: string,
+  queryVector: number[],
+  limit: number,
+  fileFilter?: string,
+  languageFilter?: string,
+): Promise<SearchResult[]> {
+  const qdrant = getClient();
 
   const filter: { must: Array<{ key: string; match: { value: string } }> } = { must: [] };
   if (fileFilter) {
@@ -355,7 +368,9 @@ export async function searchChunks(
 }
 
 /** Merge results from multiple collection queries using client-side Reciprocal Rank Fusion.
- * Deduplicates by relativePath — first (higher-priority) collection wins on conflict.
+ * Deduplicates by `label::relativePath` so that files with the same relative path
+ * in different projects are kept as separate hits. Within a single project,
+ * the first (higher-priority) occurrence wins on conflict.
  * Exported for unit testing. */
 export function mergeMultiCollectionResults(
   collectionResults: Array<{ label: string; results: SearchResult[] }>,
@@ -367,7 +382,7 @@ export function mergeMultiCollectionResults(
   for (const { label, results } of collectionResults) {
     for (let rank = 0; rank < results.length; rank++) {
       const r = results[rank];
-      const key = r.relativePath;
+      const key = `${label}::${r.relativePath}`;
       const rrfContribution = 1 / (RRF_K + rank + 1);
 
       const existing = scored.get(key);
@@ -414,6 +429,9 @@ export async function searchMultipleCollections(
     return results.map((r) => ({ ...r, project: collections[0].label }));
   }
 
+  // Compute the dense embedding once for all collections
+  const queryVector = await generateQueryEmbedding(query);
+
   // Query all collections in parallel, requesting extra candidates for RRF re-ranking
   const perCollectionLimit = Math.max(limit * 2, 20);
   const collectionResults: Array<{ label: string; results: SearchResult[] }> = [];
@@ -421,7 +439,7 @@ export async function searchMultipleCollections(
   const allResults = await Promise.all(
     collections.map(async ({ name, label }) => {
       try {
-        const results = await searchChunks(name, query, perCollectionLimit, fileFilter, languageFilter);
+        const results = await searchChunksWithVector(name, query, queryVector, perCollectionLimit, fileFilter, languageFilter);
         return { label, results };
       } catch (err) {
         logger.warn("searchMultipleCollections: collection query failed, skipping", {
