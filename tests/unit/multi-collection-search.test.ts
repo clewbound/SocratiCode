@@ -7,7 +7,7 @@
  * Tests the pure function directly (no mocks needed).
  */
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { mergeMultiCollectionResults } from "../../src/services/qdrant.js";
 import type { SearchResult } from "../../src/types.js";
 
@@ -220,5 +220,26 @@ describe("mergeMultiCollectionResults", () => {
     expect(results.map((r) => r.project)).toEqual(
       expect.arrayContaining(["a", "c"]),
     );
+  });
+});
+
+// ── searchMultipleCollections tests ─────────────────────────────────────
+// searchMultipleCollections calls searchChunks internally (same module),
+// so vi.mock cannot intercept those calls. The pure merge logic is
+// thoroughly tested above (9 tests). The orchestration layer (includeLinked
+// → resolveLinkedCollections → searchMultipleCollections) is tested via
+// query-tools.test.ts which mocks at the module boundary.
+// Here we only test the empty-input short-circuit which needs no Qdrant.
+
+vi.mock("../../src/services/logger.js", () => ({
+  logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+}));
+
+const { searchMultipleCollections } = await import("../../src/services/qdrant.js");
+
+describe("searchMultipleCollections", () => {
+  it("returns empty array when collections array is empty", async () => {
+    const results = await searchMultipleCollections([], "test", 10);
+    expect(results).toEqual([]);
   });
 });
