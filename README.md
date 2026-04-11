@@ -29,7 +29,7 @@
 
 > If SocratiCode has been useful to you, please ⭐ **star this repo** — it helps others discover it — and share it with your dev team and fellow developers!
 
-**One thing, done well: deep codebase intelligence — zero setup, no bloat, fully automatic.** SocratiCode gives AI assistants deep semantic understanding of your codebase — hybrid search, polyglot code dependency graphs, and searchable context artifacts (database schemas, API specs, infra configs, architecture docs). Zero configuration — add it to **any MCP host**, or install the **Claude Code plugin** for built-in workflow skills. It manages everything automatically.
+**One thing, done well: deep codebase intelligence — zero setup, no bloat, fully automatic.** SocratiCode gives AI assistants deep semantic understanding of your codebase — hybrid search, cross-project search, polyglot code dependency graphs, and searchable context artifacts (database schemas, API specs, infra configs, architecture docs). Zero configuration — add it to **any MCP host**, or install the **Claude Code plugin** for built-in workflow skills. It manages everything automatically.
 
 **Production-ready**, battle-tested on **enterprise-level** large repositories (up to and over **~40 million lines of code**). **Batched**, automatic **resumable** indexing checkpoints progress — pauses, crashes, restarts, and interruptions don't lose work. The file watcher keeps the **index automatically updated** at every file change and across sessions. **Multi-agent ready** — multiple AI agents can work on the same codebase simultaneously, sharing a single index with automatic coordination and zero configuration.
 
@@ -161,6 +161,7 @@ I built SocratiCode because I regularly work on existing, large, and complex cod
 - **Flexible Embedding Providers** — Switch between Local Ollama (private), Docker Ollama (zero-config), OpenAI (fastest), or Google Gemini (free tier) with a single environment variable. No provider-specific configuration files.
 - **Enterprise-Ready Simplicity** — No agent coordination tuning, no memory limit environment variables, no coordinator/conductor capacity knobs, no backpressure configuration. SocratiCode scales by relying on production-grade infrastructure (Qdrant, proven embedding APIs) rather than complex in-process orchestration.
 - **Multi-Agent Ready** — Multiple AI agents share a single index with zero configuration. Cross-process locking coordinates indexing and watching automatically — one agent indexes, all agents search, one watcher keeps everyone current. Crashed agents don't block others; stale locks are reclaimed automatically.
+- **Cross-Project & Branch-Aware** — Search across multiple related repositories in a single query via linked projects. Maintain separate indexes per git branch for CI/CD pipelines and PR review workflows. Results from linked projects are tagged with source labels and deduplicated automatically.
 - **Measurably better than grep** — On VS Code's 2.45M‑line codebase, SocratiCode answers architectural questions with **61% less data**, **84% fewer steps**, and **37× faster** response than a grep‑based AI agent. [Full benchmark →](#real-world-benchmark-vs-code-245m-lines-of-code-with-claude-opus-46)
 
 ## Features
