@@ -282,6 +282,29 @@ describe("config", () => {
       // Different collection names
       expect(collections[0].name).not.toBe(collections[1].name);
     });
+
+    it("linked collections use base hash without branch suffix when SOCRATICODE_BRANCH_AWARE is true", () => {
+      process.env.SOCRATICODE_BRANCH_AWARE = "true";
+      fs.writeFileSync(
+        path.join(projectDir, ".socraticode.json"),
+        JSON.stringify({ linkedProjects: ["../linked-lib"] }),
+      );
+
+      // Get linked collection name with branch-aware on
+      const withBranch = resolveLinkedCollections(projectDir);
+      expect(withBranch).toHaveLength(2);
+      const linkedNameWithBranch = withBranch[1].name;
+
+      // Get linked collection name with branch-aware off
+      delete process.env.SOCRATICODE_BRANCH_AWARE;
+      const withoutBranch = resolveLinkedCollections(projectDir);
+      const linkedNameWithoutBranch = withoutBranch[1].name;
+
+      // Linked project collection name must be identical regardless of SOCRATICODE_BRANCH_AWARE
+      expect(linkedNameWithBranch).toBe(linkedNameWithoutBranch);
+      // And must NOT contain a branch suffix (double-underscore)
+      expect(linkedNameWithBranch).not.toContain("__");
+    });
   });
 
   // ── Branch awareness ────────────────────────────────────────────────

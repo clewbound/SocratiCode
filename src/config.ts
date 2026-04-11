@@ -61,18 +61,27 @@ export function projectIdFromPath(folderPath: string): string {
     }
     return explicit;
   }
-  const normalized = path.resolve(folderPath);
-  let id = createHash("sha256").update(normalized).digest("hex").slice(0, 12);
+  let id = coreProjectId(folderPath);
 
   // Branch-aware mode: append sanitized branch name to isolate per-branch indexes
   if (process.env.SOCRATICODE_BRANCH_AWARE === "true") {
-    const branch = detectGitBranch(normalized);
+    const branch = detectGitBranch(path.resolve(folderPath));
     if (branch) {
       id = `${id}__${sanitizeBranchName(branch)}`;
     }
   }
 
   return id;
+}
+
+/**
+ * Core project ID: SHA-256 hash of the resolved path, without branch suffix.
+ * Used internally by resolveLinkedCollections so linked projects always
+ * resolve to their base collection regardless of SOCRATICODE_BRANCH_AWARE.
+ */
+function coreProjectId(folderPath: string): string {
+  const normalized = path.resolve(folderPath);
+  return createHash("sha256").update(normalized).digest("hex").slice(0, 12);
 }
 
 /**
@@ -170,9 +179,11 @@ export function resolveLinkedCollections(
 
   const linked = loadLinkedProjects(resolvedRoot);
   for (const linkedPath of linked) {
-    const linkedId = projectIdFromPath(linkedPath);
-    // Skip if same project ID (e.g. worktrees sharing SOCRATICODE_PROJECT_ID)
-    if (linkedId === currentId) continue;
+    // Use base hash (no branch suffix) — linked projects are resolved by their
+    // standard collection name regardless of SOCRATICODE_BRANCH_AWARE.
+    const linkedId = coreProjectId(linkedPath);
+    // Skip if same base project (e.g. worktrees sharing SOCRATICODE_PROJECT_ID)
+    if (collectionName(linkedId) === collections[0].name) continue;
     collections.push({
       name: collectionName(linkedId),
       label: path.basename(linkedPath),
