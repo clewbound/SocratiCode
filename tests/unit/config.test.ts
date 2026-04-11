@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 Giancarlo Erra - Altaire Limited
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -344,11 +345,16 @@ describe("config", () => {
   });
 
   describe("detectGitBranch", () => {
-    it("detects a branch in the current repo", () => {
-      // This test runs inside the socraticode git repo
-      const branch = detectGitBranch(process.cwd());
-      expect(branch).toBeTruthy();
-      expect(typeof branch).toBe("string");
+    it("detects a branch in a git repo", () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "socraticode-git-"));
+      try {
+        execFileSync("git", ["init", "-b", "test-branch", tmpDir]);
+        execFileSync("git", ["commit", "--allow-empty", "-m", "init"], { cwd: tmpDir });
+        const branch = detectGitBranch(tmpDir);
+        expect(branch).toBe("test-branch");
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
     });
 
     it("returns null for non-git directories", () => {
@@ -369,22 +375,34 @@ describe("config", () => {
     });
 
     it("appends branch suffix when SOCRATICODE_BRANCH_AWARE=true", () => {
-      process.env.SOCRATICODE_BRANCH_AWARE = "true";
-      // Run from current repo directory so git detection works
-      const id = projectIdFromPath(process.cwd());
-      expect(id).toContain("__");
-      // Hash part + __ + branch
-      const parts = id.split("__");
-      expect(parts[0]).toMatch(/^[0-9a-f]{12}$/);
-      expect(parts[1]).toBeTruthy();
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "socraticode-braware-"));
+      try {
+        execFileSync("git", ["init", "-b", "my-feature", tmpDir]);
+        execFileSync("git", ["commit", "--allow-empty", "-m", "init"], { cwd: tmpDir });
+        process.env.SOCRATICODE_BRANCH_AWARE = "true";
+        const id = projectIdFromPath(tmpDir);
+        expect(id).toContain("__");
+        const parts = id.split("__");
+        expect(parts[0]).toMatch(/^[0-9a-f]{12}$/);
+        expect(parts[1]).toBe("my-feature");
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
     });
 
     it("produces valid Qdrant collection names with branch suffix", () => {
-      process.env.SOCRATICODE_BRANCH_AWARE = "true";
-      const id = projectIdFromPath(process.cwd());
-      const coll = collectionName(id);
-      // Must be valid Qdrant name: [a-zA-Z0-9_-]+
-      expect(coll).toMatch(/^[a-zA-Z0-9_-]+$/);
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "socraticode-braware-"));
+      try {
+        execFileSync("git", ["init", "-b", "feat/some-branch", tmpDir]);
+        execFileSync("git", ["commit", "--allow-empty", "-m", "init"], { cwd: tmpDir });
+        process.env.SOCRATICODE_BRANCH_AWARE = "true";
+        const id = projectIdFromPath(tmpDir);
+        const coll = collectionName(id);
+        // Must be valid Qdrant name: [a-zA-Z0-9_-]+
+        expect(coll).toMatch(/^[a-zA-Z0-9_-]+$/);
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
     });
 
     it("does not append branch when SOCRATICODE_PROJECT_ID is set", () => {
