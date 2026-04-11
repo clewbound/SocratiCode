@@ -344,12 +344,14 @@ describe("config", () => {
     });
   });
 
+  const gitEnv = { ...process.env, GIT_AUTHOR_NAME: "test", GIT_AUTHOR_EMAIL: "test@test.com", GIT_COMMITTER_NAME: "test", GIT_COMMITTER_EMAIL: "test@test.com" };
+
   describe("detectGitBranch", () => {
     it("detects a branch in a git repo", () => {
       const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "socraticode-git-"));
       try {
         execFileSync("git", ["init", "-b", "test-branch", tmpDir]);
-        execFileSync("git", ["commit", "--allow-empty", "-m", "init"], { cwd: tmpDir });
+        execFileSync("git", ["commit", "--allow-empty", "-m", "init"], { cwd: tmpDir, env: gitEnv });
         const branch = detectGitBranch(tmpDir);
         expect(branch).toBe("test-branch");
       } finally {
@@ -378,7 +380,7 @@ describe("config", () => {
       const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "socraticode-braware-"));
       try {
         execFileSync("git", ["init", "-b", "my-feature", tmpDir]);
-        execFileSync("git", ["commit", "--allow-empty", "-m", "init"], { cwd: tmpDir });
+        execFileSync("git", ["commit", "--allow-empty", "-m", "init"], { cwd: tmpDir, env: gitEnv });
         process.env.SOCRATICODE_BRANCH_AWARE = "true";
         const id = projectIdFromPath(tmpDir);
         expect(id).toContain("__");
@@ -394,7 +396,7 @@ describe("config", () => {
       const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "socraticode-braware-"));
       try {
         execFileSync("git", ["init", "-b", "feat/some-branch", tmpDir]);
-        execFileSync("git", ["commit", "--allow-empty", "-m", "init"], { cwd: tmpDir });
+        execFileSync("git", ["commit", "--allow-empty", "-m", "init"], { cwd: tmpDir, env: gitEnv });
         process.env.SOCRATICODE_BRANCH_AWARE = "true";
         const id = projectIdFromPath(tmpDir);
         const coll = collectionName(id);
