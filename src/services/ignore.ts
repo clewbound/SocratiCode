@@ -158,5 +158,6 @@ function findNestedGitignores(rootPath: string, currentPath: string, ig: Ignore)
  * Check if a relative path should be ignored.
  */
 export function shouldIgnore(ig: Ignore, relativePath: string): boolean {
-  return ig.ignores(relativePath);
+  const normalized = relativePath.split(path.sep).join("/");
+  return ig.ignores(normalized);
 }

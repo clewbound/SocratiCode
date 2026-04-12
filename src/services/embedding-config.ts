@@ -129,13 +129,12 @@ export function loadEmbeddingConfig(): EmbeddingConfig {
 
   // ── Model & dimensions (provider-specific defaults) ─────────────────
   const embeddingModel = process.env.EMBEDDING_MODEL || providerDefaults.model;
-  const rawDimensions = parseInt(
-    process.env.EMBEDDING_DIMENSIONS || String(providerDefaults.dimensions),
-    10,
+  const rawDimensions = Number(
+    process.env.EMBEDDING_DIMENSIONS || providerDefaults.dimensions,
   );
-  if (Number.isNaN(rawDimensions)) {
+  if (!Number.isInteger(rawDimensions) || rawDimensions <= 0) {
     throw new Error(
-      `Invalid EMBEDDING_DIMENSIONS: "${process.env.EMBEDDING_DIMENSIONS}". Must be a number.`,
+      `Invalid EMBEDDING_DIMENSIONS: "${process.env.EMBEDDING_DIMENSIONS}". Must be a positive integer.`,
     );
   }
   const embeddingDimensions = rawDimensions;
@@ -150,10 +149,10 @@ export function loadEmbeddingConfig(): EmbeddingConfig {
     embeddingDimensions,
     embeddingContextLength: contextLengthEnv
       ? (() => {
-          const parsed = parseInt(contextLengthEnv, 10);
-          if (Number.isNaN(parsed)) {
+          const parsed = Number(contextLengthEnv);
+          if (!Number.isInteger(parsed) || parsed <= 0) {
             throw new Error(
-              `Invalid EMBEDDING_CONTEXT_LENGTH: "${contextLengthEnv}". Must be a number.`,
+              `Invalid EMBEDDING_CONTEXT_LENGTH: "${contextLengthEnv}". Must be a positive integer.`,
             );
           }
           return parsed;

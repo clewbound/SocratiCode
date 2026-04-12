@@ -515,7 +515,7 @@ Uses depth-first search (DFS) with a recursion stack to find cycles in the direc
 
 ## Testing
 
-SocratiCode uses **vitest** as its test framework with **634 tests** across three layers.
+SocratiCode uses **vitest** as its test framework with **765 tests** across three layers.
 
 ### Running Tests
 

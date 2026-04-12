@@ -26,7 +26,7 @@ const LOG_LEVELS: Record<LogLevel, number> = {
 };
 
 const envLevel = process.env.SOCRATICODE_LOG_LEVEL?.toLowerCase();
-const currentLevel: LogLevel = envLevel && envLevel in LOG_LEVELS
+const currentLevel: LogLevel = envLevel && Object.hasOwn(LOG_LEVELS, envLevel)
   ? (envLevel as LogLevel)
   : "info";
 const logFilePath: string | undefined = process.env.SOCRATICODE_LOG_FILE || undefined;
