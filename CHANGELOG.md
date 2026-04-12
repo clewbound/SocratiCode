@@ -4,6 +4,13 @@ All notable changes to SocratiCode are documented here.
 This project uses [Conventional Commits](https://www.conventionalcommits.org/) and [Semantic Versioning](https://semver.org/).
 
 
+## [1.4.1](https://github.com/giancarloerra/socraticode/compare/v1.4.0...v1.4.1) (2026-04-12)
+
+### Bug Fixes
+
+* address CodeRabbit PR review feedback ([00f7be1](https://github.com/giancarloerra/socraticode/commit/00f7be169c94661a098fff5e9354746823db1630))
+* address CodeRabbit review findings ([bb5e6c3](https://github.com/giancarloerra/socraticode/commit/bb5e6c3e198effb1809d0a6c5286a34f8da0df68))
+
 ## [1.4.0](https://github.com/giancarloerra/socraticode/compare/v1.3.2...v1.4.0) (2026-04-12)
 
 ### Features
