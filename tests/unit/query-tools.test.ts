@@ -7,6 +7,7 @@
  * provider, and uses getEmbeddingProvider() for OpenAI/Google.
  */
 
+import path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // ── Mocks ────────────────────────────────────────────────────────────────
@@ -64,19 +65,29 @@ vi.mock("../../src/services/docker.js", () => ({
 
 // ── qdrant.js mock ───────────────────────────────────────────────────────
 
-const mockSearchChunks = vi.fn(async (_collection: string, _query: string, _limit: number) => []);
+import type { SearchResult } from "../../src/types.js";
+
+const mockSearchChunks = vi.fn(async (_collection: string, _query: string, _limit: number): Promise<SearchResult[]> => []);
+const mockSearchMultipleCollections = vi.fn(async (): Promise<SearchResult[]> => []);
 
 vi.mock("../../src/services/qdrant.js", () => ({
   searchChunks: (...args: unknown[]) => mockSearchChunks(...(args as [string, string, number])),
+  searchMultipleCollections: (...args: unknown[]) => mockSearchMultipleCollections(...(args as [])),
   getCollectionInfo: vi.fn(async () => ({ points_count: 0 })),
   getProjectMetadata: vi.fn(async () => null),
 }));
 
 // ── config.js mock ───────────────────────────────────────────────────────
 
+const mockResolveLinkedCollections = vi.fn(() => [
+  { name: "codebase_abc123", label: "my-project" },
+  { name: "codebase_def456", label: "shared-lib" },
+]);
+
 vi.mock("../../src/config.js", () => ({
   collectionName: vi.fn(() => "test-collection"),
   projectIdFromPath: vi.fn(() => "test-project-id"),
+  resolveLinkedCollections: (...args: unknown[]) => mockResolveLinkedCollections(...(args as [])),
 }));
 
 // ── indexer.js mock ──────────────────────────────────────────────────────
@@ -176,5 +187,123 @@ describe("codebase_search — embedding provider readiness guard", () => {
 
     expect(mockEnsureOllamaReady).not.toHaveBeenCalled();
     expect(mockGetEmbeddingProvider).toHaveBeenCalledOnce();
+  });
+});
+
+// ── includeLinked tests ──────────────────────────────────────────────────
+
+describe("codebase_search — includeLinked parameter", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    // Default: ollama provider
+    mockGetEmbeddingConfig.mockReturnValue({
+      embeddingProvider: "ollama",
+      embeddingModel: "test-model",
+    });
+  });
+
+  it("calls searchChunks (not searchMultipleCollections) when includeLinked is omitted", async () => {
+    await handleQueryTool("codebase_search", {
+      projectPath: TEST_PATH,
+      query: "test query",
+    });
+
+    expect(mockSearchChunks).toHaveBeenCalledOnce();
+    expect(mockSearchMultipleCollections).not.toHaveBeenCalled();
+    expect(mockResolveLinkedCollections).not.toHaveBeenCalled();
+  });
+
+  it("calls searchChunks (not searchMultipleCollections) when includeLinked is false", async () => {
+    await handleQueryTool("codebase_search", {
+      projectPath: TEST_PATH,
+      query: "test query",
+      includeLinked: false,
+    });
+
+    expect(mockSearchChunks).toHaveBeenCalledOnce();
+    expect(mockSearchMultipleCollections).not.toHaveBeenCalled();
+    expect(mockResolveLinkedCollections).not.toHaveBeenCalled();
+  });
+
+  it("calls searchMultipleCollections when includeLinked is true", async () => {
+    await handleQueryTool("codebase_search", {
+      projectPath: TEST_PATH,
+      query: "test query",
+      includeLinked: true,
+    });
+
+    expect(mockSearchMultipleCollections).toHaveBeenCalledOnce();
+    expect(mockResolveLinkedCollections).toHaveBeenCalledOnce();
+    expect(mockSearchChunks).not.toHaveBeenCalled();
+  });
+
+  it("passes collections from resolveLinkedCollections to searchMultipleCollections", async () => {
+    await handleQueryTool("codebase_search", {
+      projectPath: TEST_PATH,
+      query: "find me",
+      includeLinked: true,
+      limit: 5,
+    });
+
+    expect(mockResolveLinkedCollections).toHaveBeenCalledWith(
+      expect.stringContaining(path.resolve(TEST_PATH)),
+    );
+    expect(mockSearchMultipleCollections).toHaveBeenCalledWith(
+      [
+        { name: "codebase_abc123", label: "my-project" },
+        { name: "codebase_def456", label: "shared-lib" },
+      ],
+      "find me",
+      5,
+      undefined, // fileFilter
+      undefined, // languageFilter
+    );
+  });
+
+  it("includes project label in output when results have project field", async () => {
+    mockSearchMultipleCollections.mockResolvedValueOnce([
+      {
+        filePath: "/proj/src/index.ts",
+        relativePath: "src/index.ts",
+        content: "console.log('hello')",
+        startLine: 1,
+        endLine: 5,
+        language: "typescript",
+        score: 0.5,
+        project: "shared-lib",
+      },
+    ]);
+
+    const output = await handleQueryTool("codebase_search", {
+      projectPath: TEST_PATH,
+      query: "hello",
+      includeLinked: true,
+    });
+
+    expect(output).toContain("[shared-lib]");
+    expect(output).toContain("src/index.ts");
+  });
+
+  it("does not include project tag when project field is absent", async () => {
+    mockSearchChunks.mockResolvedValueOnce([
+      {
+        filePath: "/proj/src/index.ts",
+        relativePath: "src/index.ts",
+        content: "console.log('hello')",
+        startLine: 1,
+        endLine: 5,
+        language: "typescript",
+        score: 0.5,
+      },
+    ]);
+
+    const output = await handleQueryTool("codebase_search", {
+      projectPath: TEST_PATH,
+      query: "hello",
+    });
+
+    // Should have the file but no project tag brackets
+    expect(output).toContain("src/index.ts");
+    expect(output).not.toMatch(/\[.*-.*\]/); // no [project-name] tag
   });
 });

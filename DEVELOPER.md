@@ -178,7 +178,7 @@ This will automatically:
 ```
 src/
 ├── index.ts                 # MCP server entry point — registers all 21 tools
-├── config.ts                # Project ID generation (SHA-256), collection naming
+├── config.ts                # Project ID generation (SHA-256), collection naming, linked projects, branch detection
 ├── constants.ts             # All constants: ports, container names, models, chunk sizes, extensions
 ├── types.ts                 # TypeScript interfaces and types
 │
@@ -269,6 +269,14 @@ Defined in `src/config.ts`:
 - **Context artifacts collection**: `context_{projectId}`
 
 This means the same folder path always maps to the same collection, even across restarts.
+
+#### Branch-aware mode
+
+When `SOCRATICODE_BRANCH_AWARE=true`, the current git branch is detected via `git rev-parse --abbrev-ref HEAD` and appended to the project ID (e.g. `abc123def456__feat_my-feature`). Branch names are sanitized: non-alphanumeric characters (except `-`) become `_`, consecutive underscores collapse, leading/trailing underscores are stripped. Detached HEAD states fall back to the branchless ID. Ignored when `SOCRATICODE_PROJECT_ID` is set explicitly.
+
+#### Linked projects
+
+`loadLinkedProjects()` reads `.socraticode.json` and `SOCRATICODE_LINKED_PROJECTS` env var. `resolveLinkedCollections()` maps linked paths to `{ name, label }` descriptors for `searchMultipleCollections()`. The current project is always first (highest dedup priority).
 
 ### Supported File Extensions (54)
 

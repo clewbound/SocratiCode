@@ -170,7 +170,7 @@ function migrateAbsolutePathKeys(hashes: Map<string, string>, resolvedProjectPat
 
   // Try to strip the stored project path prefix, or detect the common prefix
   const prefix = resolvedProjectPath
-    ? resolvedProjectPath + "/"
+    ? `${resolvedProjectPath}/`
     : detectCommonPrefix(hashes);
 
   if (!prefix) {

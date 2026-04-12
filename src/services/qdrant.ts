@@ -309,8 +309,21 @@ export async function searchChunks(
   fileFilter?: string,
   languageFilter?: string,
 ): Promise<SearchResult[]> {
-  const qdrant = getClient();
   const queryVector = await generateQueryEmbedding(query);
+  return searchChunksWithVector(collectionName, query, queryVector, limit, fileFilter, languageFilter);
+}
+
+/** Internal: hybrid search using a pre-computed dense embedding vector.
+ * Avoids recomputing the same embedding when querying multiple collections. */
+async function searchChunksWithVector(
+  collectionName: string,
+  query: string,
+  queryVector: number[],
+  limit: number,
+  fileFilter?: string,
+  languageFilter?: string,
+): Promise<SearchResult[]> {
+  const qdrant = getClient();
 
   const filter: { must: Array<{ key: string; match: { value: string } }> } = { must: [] };
   if (fileFilter) {
@@ -352,6 +365,95 @@ export async function searchChunks(
     language: r.payload?.language as string,
     score: r.score,
   }));
+}
+
+/** Merge results from multiple collection queries using client-side Reciprocal Rank Fusion.
+ * Deduplicates by `label::relativePath` so that files with the same relative path
+ * in different projects are kept as separate hits. Within a single project,
+ * the first (higher-priority) occurrence wins on conflict.
+ * Exported for unit testing. */
+export function mergeMultiCollectionResults(
+  collectionResults: Array<{ label: string; results: SearchResult[] }>,
+  limit: number,
+): SearchResult[] {
+  const RRF_K = 60;
+  const scored = new Map<string, SearchResult & { rrfScore: number }>();
+
+  for (const { label, results } of collectionResults) {
+    for (let rank = 0; rank < results.length; rank++) {
+      const r = results[rank];
+      const key = `${label}::${r.relativePath}`;
+      const rrfContribution = 1 / (RRF_K + rank + 1);
+
+      const existing = scored.get(key);
+      if (existing) {
+        existing.rrfScore += rrfContribution;
+        // Keep the version from the higher-priority (earlier) collection
+      } else {
+        scored.set(key, { ...r, project: label, rrfScore: rrfContribution });
+      }
+    }
+  }
+
+  return Array.from(scored.values())
+    .sort((a, b) => b.rrfScore - a.rrfScore)
+    .slice(0, limit)
+    .map(({ rrfScore, ...result }) => ({
+      ...result,
+      score: rrfScore,
+    }));
+}
+
+/** Search across multiple collections in parallel with client-side RRF fusion and deduplication.
+ * Each collection's results are queried independently, then merged using Reciprocal Rank Fusion.
+ * When the same relativePath appears in multiple collections, the result from the
+ * earlier (higher-priority) collection wins.
+ *
+ * @param collections - Array of { name, label } where label identifies the source project
+ *   in results. Order defines priority for deduplication (first wins).
+ * @param query - Natural language search query.
+ * @param limit - Maximum total results to return after merge.
+ * @param fileFilter - Optional relativePath filter applied to every collection.
+ * @param languageFilter - Optional language filter applied to every collection.
+ */
+export async function searchMultipleCollections(
+  collections: Array<{ name: string; label: string }>,
+  query: string,
+  limit: number = 10,
+  fileFilter?: string,
+  languageFilter?: string,
+): Promise<SearchResult[]> {
+  if (collections.length === 0) return [];
+  if (collections.length === 1) {
+    const results = await searchChunks(collections[0].name, query, limit, fileFilter, languageFilter);
+    return results.map((r) => ({ ...r, project: collections[0].label }));
+  }
+
+  // Compute the dense embedding once for all collections
+  const queryVector = await generateQueryEmbedding(query);
+
+  // Query all collections in parallel, requesting extra candidates for RRF re-ranking
+  const perCollectionLimit = Math.max(limit * 2, 20);
+  const collectionResults: Array<{ label: string; results: SearchResult[] }> = [];
+
+  const allResults = await Promise.all(
+    collections.map(async ({ name, label }) => {
+      try {
+        const results = await searchChunksWithVector(name, query, queryVector, perCollectionLimit, fileFilter, languageFilter);
+        return { label, results };
+      } catch (err) {
+        logger.warn("searchMultipleCollections: collection query failed, skipping", {
+          collection: name,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        return { label, results: [] as SearchResult[] };
+      }
+    }),
+  );
+
+  collectionResults.push(...allResults);
+
+  return mergeMultiCollectionResults(collectionResults, limit);
 }
 
 /** Hybrid search with arbitrary payload filters.

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 Giancarlo Erra - Altaire Limited
 import path from "node:path";
-import { collectionName, projectIdFromPath } from "../config.js";
+import { collectionName, projectIdFromPath, resolveLinkedCollections } from "../config.js";
 import { SEARCH_DEFAULT_LIMIT, SEARCH_MIN_SCORE } from "../constants.js";
 import { getGraphStatus } from "../services/code-graph.js";
 import { getArtifactStatusSummary } from "../services/context-artifacts.js";
@@ -12,8 +12,9 @@ import type { IndexingProgress } from "../services/indexer.js";
 import { getIndexingProgress, getLastCompleted, isIndexingInProgress } from "../services/indexer.js";
 import { getLockHolderPid, } from "../services/lock.js";
 import { ensureOllamaReady } from "../services/ollama.js";
-import { getCollectionInfo, getProjectMetadata, searchChunks } from "../services/qdrant.js";
+import { getCollectionInfo, getProjectMetadata, searchChunks, searchMultipleCollections } from "../services/qdrant.js";
 import { ensureWatcherStarted, isWatchedByAnyProcess, isWatching } from "../services/watcher.js";
+import type { SearchResult } from "../types.js";
 
 /** Format an IndexingProgress into display lines (elapsed, progress, batches, graph). */
 function formatProgressLines(progress: IndexingProgress): {
@@ -71,8 +72,15 @@ export async function handleQueryTool(
       const limit = (args.limit as number) || SEARCH_DEFAULT_LIMIT;
       const fileFilter = args.fileFilter as string | undefined;
       const languageFilter = args.languageFilter as string | undefined;
+      const includeLinked = args.includeLinked as boolean | undefined;
 
-      const allResults = await searchChunks(collection, query, limit, fileFilter, languageFilter);
+      let allResults: SearchResult[];
+      if (includeLinked) {
+        const collections = resolveLinkedCollections(resolvedPath);
+        allResults = await searchMultipleCollections(collections, query, limit, fileFilter, languageFilter);
+      } else {
+        allResults = await searchChunks(collection, query, limit, fileFilter, languageFilter);
+      }
 
       // Apply minimum score threshold
       const minScore = (args.minScore as number) ?? SEARCH_MIN_SCORE;
@@ -110,7 +118,8 @@ export async function handleQueryTool(
       }
 
       for (const r of results) {
-        lines.push(`--- ${r.relativePath} (lines ${r.startLine}-${r.endLine}) [${r.language}] score: ${r.score.toFixed(4)} ---`);
+        const projectTag = r.project ? ` [${r.project}]` : "";
+        lines.push(`--- ${r.relativePath} (lines ${r.startLine}-${r.endLine}) [${r.language}]${projectTag} score: ${r.score.toFixed(4)} ---`);
         lines.push(r.content);
         lines.push("");
       }

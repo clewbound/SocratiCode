@@ -1,16 +1,26 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 Giancarlo Erra - Altaire Limited
-import { afterEach, describe, expect, it } from "vitest";
-import { collectionName, contextCollectionName, graphCollectionName, projectIdFromPath } from "../../src/config.js";
+import { execFileSync } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { collectionName, contextCollectionName, detectGitBranch, graphCollectionName, loadLinkedProjects, projectIdFromPath, resolveLinkedCollections, sanitizeBranchName } from "../../src/config.js";
 
 describe("config", () => {
-  // Clean up env override between tests
+  // Clean up env overrides between tests
   const originalEnv = process.env.SOCRATICODE_PROJECT_ID;
+  const originalBranchAware = process.env.SOCRATICODE_BRANCH_AWARE;
   afterEach(() => {
     if (originalEnv === undefined) {
       delete process.env.SOCRATICODE_PROJECT_ID;
     } else {
       process.env.SOCRATICODE_PROJECT_ID = originalEnv;
+    }
+    if (originalBranchAware === undefined) {
+      delete process.env.SOCRATICODE_BRANCH_AWARE;
+    } else {
+      process.env.SOCRATICODE_BRANCH_AWARE = originalBranchAware;
     }
   });
 
@@ -133,6 +143,302 @@ describe("config", () => {
       const contextColl = contextCollectionName(projectId);
       expect(contextColl).toMatch(/^[a-zA-Z0-9_-]+$/);
       expect(contextColl).toMatch(/^context_[0-9a-f]{12}$/);
+    });
+  });
+
+  // ── Linked projects ─────────────────────────────────────────────────
+
+  describe("loadLinkedProjects", () => {
+    let tmpDir: string;
+    let projectDir: string;
+    let linkedDirA: string;
+    let linkedDirB: string;
+    const originalLinkedEnv = process.env.SOCRATICODE_LINKED_PROJECTS;
+
+    beforeEach(() => {
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "socraticode-test-"));
+      projectDir = path.join(tmpDir, "my-project");
+      linkedDirA = path.join(tmpDir, "linked-a");
+      linkedDirB = path.join(tmpDir, "linked-b");
+      fs.mkdirSync(projectDir, { recursive: true });
+      fs.mkdirSync(linkedDirA, { recursive: true });
+      fs.mkdirSync(linkedDirB, { recursive: true });
+      delete process.env.SOCRATICODE_LINKED_PROJECTS;
+    });
+
+    afterEach(() => {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+      if (originalLinkedEnv === undefined) {
+        delete process.env.SOCRATICODE_LINKED_PROJECTS;
+      } else {
+        process.env.SOCRATICODE_LINKED_PROJECTS = originalLinkedEnv;
+      }
+    });
+
+    it("returns empty array when no .socraticode.json exists", () => {
+      expect(loadLinkedProjects(projectDir)).toEqual([]);
+    });
+
+    it("reads linked projects from .socraticode.json", () => {
+      fs.writeFileSync(
+        path.join(projectDir, ".socraticode.json"),
+        JSON.stringify({ linkedProjects: ["../linked-a", "../linked-b"] }),
+      );
+      const result = loadLinkedProjects(projectDir);
+      expect(result).toHaveLength(2);
+      expect(result).toContain(linkedDirA);
+      expect(result).toContain(linkedDirB);
+    });
+
+    it("skips non-existent linked paths", () => {
+      fs.writeFileSync(
+        path.join(projectDir, ".socraticode.json"),
+        JSON.stringify({ linkedProjects: ["../linked-a", "../does-not-exist"] }),
+      );
+      const result = loadLinkedProjects(projectDir);
+      expect(result).toHaveLength(1);
+      expect(result).toContain(linkedDirA);
+    });
+
+    it("skips self-references", () => {
+      fs.writeFileSync(
+        path.join(projectDir, ".socraticode.json"),
+        JSON.stringify({ linkedProjects: [".", "../my-project"] }),
+      );
+      expect(loadLinkedProjects(projectDir)).toEqual([]);
+    });
+
+    it("reads from SOCRATICODE_LINKED_PROJECTS env var", () => {
+      process.env.SOCRATICODE_LINKED_PROJECTS = `${linkedDirA},${linkedDirB}`;
+      const result = loadLinkedProjects(projectDir);
+      expect(result).toHaveLength(2);
+      expect(result).toContain(linkedDirA);
+      expect(result).toContain(linkedDirB);
+    });
+
+    it("merges config file and env var without duplicates", () => {
+      fs.writeFileSync(
+        path.join(projectDir, ".socraticode.json"),
+        JSON.stringify({ linkedProjects: ["../linked-a"] }),
+      );
+      process.env.SOCRATICODE_LINKED_PROJECTS = `${linkedDirA},${linkedDirB}`;
+      const result = loadLinkedProjects(projectDir);
+      // linked-a appears in both sources but should be deduplicated
+      expect(result).toHaveLength(2);
+      expect(result).toContain(linkedDirA);
+      expect(result).toContain(linkedDirB);
+    });
+
+    it("handles malformed .socraticode.json gracefully", () => {
+      fs.writeFileSync(path.join(projectDir, ".socraticode.json"), "not valid json{{{");
+      expect(loadLinkedProjects(projectDir)).toEqual([]);
+    });
+
+    it("handles .socraticode.json with missing linkedProjects field", () => {
+      fs.writeFileSync(
+        path.join(projectDir, ".socraticode.json"),
+        JSON.stringify({ someOtherField: true }),
+      );
+      expect(loadLinkedProjects(projectDir)).toEqual([]);
+    });
+  });
+
+  describe("resolveLinkedCollections", () => {
+    let tmpDir: string;
+    let projectDir: string;
+    let linkedDir: string;
+    const savedLinkedEnv = process.env.SOCRATICODE_LINKED_PROJECTS;
+    const savedProjectIdEnv = process.env.SOCRATICODE_PROJECT_ID;
+
+    beforeEach(() => {
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "socraticode-test-"));
+      projectDir = path.join(tmpDir, "main-project");
+      linkedDir = path.join(tmpDir, "linked-lib");
+      fs.mkdirSync(projectDir, { recursive: true });
+      fs.mkdirSync(linkedDir, { recursive: true });
+      delete process.env.SOCRATICODE_LINKED_PROJECTS;
+      delete process.env.SOCRATICODE_PROJECT_ID;
+    });
+
+    afterEach(() => {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+      if (savedLinkedEnv === undefined) {
+        delete process.env.SOCRATICODE_LINKED_PROJECTS;
+      } else {
+        process.env.SOCRATICODE_LINKED_PROJECTS = savedLinkedEnv;
+      }
+      if (savedProjectIdEnv === undefined) {
+        delete process.env.SOCRATICODE_PROJECT_ID;
+      } else {
+        process.env.SOCRATICODE_PROJECT_ID = savedProjectIdEnv;
+      }
+    });
+
+    it("returns only current project when no links configured", () => {
+      const collections = resolveLinkedCollections(projectDir);
+      expect(collections).toHaveLength(1);
+      expect(collections[0].label).toBe("main-project");
+      expect(collections[0].name).toMatch(/^codebase_/);
+    });
+
+    it("returns current + linked collections with correct labels", () => {
+      fs.writeFileSync(
+        path.join(projectDir, ".socraticode.json"),
+        JSON.stringify({ linkedProjects: ["../linked-lib"] }),
+      );
+      const collections = resolveLinkedCollections(projectDir);
+      expect(collections).toHaveLength(2);
+      // Current project is first (highest priority)
+      expect(collections[0].label).toBe("main-project");
+      expect(collections[1].label).toBe("linked-lib");
+      // Different collection names
+      expect(collections[0].name).not.toBe(collections[1].name);
+    });
+
+    it("linked collections use base hash without branch suffix when SOCRATICODE_BRANCH_AWARE is true", () => {
+      process.env.SOCRATICODE_BRANCH_AWARE = "true";
+      fs.writeFileSync(
+        path.join(projectDir, ".socraticode.json"),
+        JSON.stringify({ linkedProjects: ["../linked-lib"] }),
+      );
+
+      // Get linked collection name with branch-aware on
+      const withBranch = resolveLinkedCollections(projectDir);
+      expect(withBranch).toHaveLength(2);
+      const linkedNameWithBranch = withBranch[1].name;
+
+      // Get linked collection name with branch-aware off
+      delete process.env.SOCRATICODE_BRANCH_AWARE;
+      const withoutBranch = resolveLinkedCollections(projectDir);
+      const linkedNameWithoutBranch = withoutBranch[1].name;
+
+      // Linked project collection name must be identical regardless of SOCRATICODE_BRANCH_AWARE
+      expect(linkedNameWithBranch).toBe(linkedNameWithoutBranch);
+      // And must NOT contain a branch suffix (double-underscore)
+      expect(linkedNameWithBranch).not.toContain("__");
+    });
+  });
+
+  // ── Branch awareness ────────────────────────────────────────────────
+
+  describe("sanitizeBranchName", () => {
+    it("passes through simple branch names", () => {
+      expect(sanitizeBranchName("main")).toBe("main");
+      expect(sanitizeBranchName("develop")).toBe("develop");
+    });
+
+    it("replaces slashes with underscores", () => {
+      expect(sanitizeBranchName("feat/my-feature")).toBe("feat_my-feature");
+    });
+
+    it("handles deeply nested branch names", () => {
+      expect(sanitizeBranchName("feature/JIRA-123/some-work")).toBe(
+        "feature_JIRA-123_some-work",
+      );
+    });
+
+    it("collapses consecutive underscores", () => {
+      expect(sanitizeBranchName("feat//double")).toBe("feat_double");
+    });
+
+    it("strips leading and trailing underscores", () => {
+      expect(sanitizeBranchName("/leading")).toBe("leading");
+      expect(sanitizeBranchName("trailing/")).toBe("trailing");
+    });
+
+    it("preserves hyphens", () => {
+      expect(sanitizeBranchName("my-branch-name")).toBe("my-branch-name");
+    });
+
+    it("replaces special characters", () => {
+      expect(sanitizeBranchName("feat@v2.0")).toBe("feat_v2_0");
+    });
+
+    it("returns empty string when all characters are invalid", () => {
+      expect(sanitizeBranchName("///")).toBe("");
+      expect(sanitizeBranchName("@@@")).toBe("");
+      expect(sanitizeBranchName("...")).toBe("");
+    });
+  });
+
+  /** Create a temporary git repo with a named branch and initial commit. */
+  function initTempRepo(tmpDir: string, branch: string): void {
+    execFileSync("git", ["init", "-b", branch, tmpDir]);
+    execFileSync("git", ["config", "user.name", "test"], { cwd: tmpDir });
+    execFileSync("git", ["config", "user.email", "test@test.com"], { cwd: tmpDir });
+    execFileSync("git", ["commit", "--allow-empty", "-m", "init"], { cwd: tmpDir });
+  }
+
+  describe("detectGitBranch", () => {
+    it("detects a branch in a git repo", () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "socraticode-git-"));
+      try {
+        initTempRepo(tmpDir, "test-branch");
+        const branch = detectGitBranch(tmpDir);
+        expect(branch).toBe("test-branch");
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it("returns null for non-git directories", () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "socraticode-nogit-"));
+      try {
+        expect(detectGitBranch(tmpDir)).toBeNull();
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe("projectIdFromPath with SOCRATICODE_BRANCH_AWARE", () => {
+    it("does not include branch suffix by default", () => {
+      const id = projectIdFromPath("/some/project/path");
+      expect(id).toMatch(/^[0-9a-f]{12}$/);
+      expect(id).not.toContain("__");
+    });
+
+    it("appends branch suffix when SOCRATICODE_BRANCH_AWARE=true", () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "socraticode-braware-"));
+      try {
+        initTempRepo(tmpDir, "my-feature");
+        process.env.SOCRATICODE_BRANCH_AWARE = "true";
+        const id = projectIdFromPath(tmpDir);
+        expect(id).toContain("__");
+        const parts = id.split("__");
+        expect(parts[0]).toMatch(/^[0-9a-f]{12}$/);
+        expect(parts[1]).toBe("my-feature");
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it("produces valid Qdrant collection names with branch suffix", () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "socraticode-braware-"));
+      try {
+        initTempRepo(tmpDir, "feat/some-branch");
+        process.env.SOCRATICODE_BRANCH_AWARE = "true";
+        const id = projectIdFromPath(tmpDir);
+        const coll = collectionName(id);
+        // Must be valid Qdrant name: [a-zA-Z0-9_-]+
+        expect(coll).toMatch(/^[a-zA-Z0-9_-]+$/);
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it("does not append branch when SOCRATICODE_PROJECT_ID is set", () => {
+      process.env.SOCRATICODE_BRANCH_AWARE = "true";
+      process.env.SOCRATICODE_PROJECT_ID = "explicit-id";
+      const id = projectIdFromPath(process.cwd());
+      expect(id).toBe("explicit-id");
+      expect(id).not.toContain("__");
+    });
+
+    it("does not append branch when SOCRATICODE_BRANCH_AWARE is not true", () => {
+      process.env.SOCRATICODE_BRANCH_AWARE = "false";
+      const id = projectIdFromPath(process.cwd());
+      expect(id).toMatch(/^[0-9a-f]{12}$/);
     });
   });
 });

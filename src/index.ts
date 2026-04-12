@@ -143,6 +143,10 @@ server.tool(
       .max(1)
       .describe("Minimum RRF score threshold (0-1). Results below this are filtered out. Default: 0.10 (override globally via SEARCH_MIN_SCORE env var). Set to 0 to disable filtering.")
       .optional(),
+    includeLinked: z
+      .boolean()
+      .describe("When true, also search across linked projects defined in .socraticode.json or SOCRATICODE_LINKED_PROJECTS env var. Results include a project label showing which project each result came from. Default: false.")
+      .optional(),
   },
   async (args) => ({
     content: [{ type: "text", text: await handleQueryTool("codebase_search", args) }],
