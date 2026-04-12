@@ -112,7 +112,7 @@ describe("code-graph service", () => {
       );
       if (helpersNode) {
         // If the graph correctly resolves imports, helpers should have dependents
-        expect(helpersNode.dependents.length).toBeGreaterThanOrEqual(0);
+        expect(helpersNode.dependents.length).toBeGreaterThan(0);
       }
     });
 
