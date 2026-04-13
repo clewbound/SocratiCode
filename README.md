@@ -163,7 +163,7 @@ SocratiCode is available as a native plugin on multiple AI coding platforms. Plu
 | Cursor | `/add-plugin https://github.com/giancarloerra/socraticode` |
 | VS Code Copilot | Command Palette → `Chat: Install Plugin From Source` → `https://github.com/giancarloerra/socraticode` |
 | Gemini CLI | `gemini extensions install https://github.com/giancarloerra/socraticode` |
-| OpenAI Codex | No public plugin directory yet — use the [MCP config](#quick-start) or [install locally](#codex-local-plugin-install) |
+| OpenAI Codex | No public plugin directory yet — use the [MCP config](#quick-start) or see **Codex local install** below |
 
 > **VS Code Copilot**: The chat plugins feature is in preview. Enable it with `chat.plugins.enabled: true` in your VS Code settings.
 

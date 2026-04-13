@@ -51,7 +51,7 @@ before reading any files directly.
 | Find exact error messages, log strings, or regex patterns | grep / ripgrep |
 | See what a file imports or what depends on it | `codebase_graph_query` |
 | Spot architectural problems | `codebase_graph_circular`, `codebase_graph_stats` |
-| Visualise module structure | `codebase_graph_visualize` |
+| Visualize module structure | `codebase_graph_visualize` |
 | Verify index is up to date | `codebase_status` |
 | Discover what project knowledge (schemas, specs, configs) is available | `codebase_context` |
 | Find database tables, API endpoints, infra configs | `codebase_context_search` |
