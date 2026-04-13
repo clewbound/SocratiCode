@@ -4,6 +4,21 @@ All notable changes to SocratiCode are documented here.
 This project uses [Conventional Commits](https://www.conventionalcommits.org/) and [Semantic Versioning](https://semver.org/).
 
 
+## [1.5.0](https://github.com/giancarloerra/socraticode/compare/v1.4.1...v1.5.0) (2026-04-13)
+
+### Features
+
+* multi-platform plugin support (Cursor, Codex, Gemini CLI, VS Code) ([529d1b2](https://github.com/giancarloerra/socraticode/commit/529d1b2a642d9681ffce437cb2f902efa5aa7e6f))
+
+### Bug Fixes
+
+* correct spelling of "visualize" in GEMINI.md and update Codex installation instructions in README.md ([b2333b5](https://github.com/giancarloerra/socraticode/commit/b2333b574c3a978c6f3f5d6645e578b5d5bf03dc))
+
+### Documentation
+
+* consolidate README ([61060d5](https://github.com/giancarloerra/socraticode/commit/61060d51538a6f9fee550b7cda7f62ac47f07518))
+* consolidate README — add feature comparison table and streamline sections ([efec8dd](https://github.com/giancarloerra/socraticode/commit/efec8dd29adb9da2c3308f1e3c470663c36773db))
+
 ## [1.4.1](https://github.com/giancarloerra/socraticode/compare/v1.4.0...v1.4.1) (2026-04-12)
 
 ### Bug Fixes
