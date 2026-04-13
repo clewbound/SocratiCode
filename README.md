@@ -31,7 +31,7 @@
 
 > If SocratiCode has been useful to you, please ⭐ **star this repo** — it helps others discover it — and share it with your dev team and fellow developers!
 
-**One thing, done well: deep codebase intelligence — zero setup, no bloat, fully automatic.** SocratiCode gives AI assistants deep semantic understanding of your codebase — hybrid search, cross-project search, polyglot code dependency graphs, and searchable context artifacts (database schemas, API specs, infra configs, architecture docs). Zero configuration — add it to **any MCP host**, or install the **Claude Code plugin** for built-in workflow skills. It manages everything automatically.
+**One thing, done well: deep codebase intelligence — zero setup, no bloat, fully automatic.** SocratiCode gives AI assistants deep semantic understanding of your codebase — hybrid search, cross-project search, polyglot code dependency graphs, and searchable context artifacts (database schemas, API specs, infra configs, architecture docs). Zero configuration — add it to **any MCP host**, or install the native **plugin** for Claude Code, Cursor, VS Code Copilot, Codex or Gemini CLI. It manages everything automatically.
 
 **Production-ready**, battle-tested on **enterprise-level** large repositories (up to and over **~40 million lines of code**). **Batched**, automatic **resumable** indexing checkpoints progress — pauses, crashes, restarts, and interruptions don't lose work. The file watcher keeps the **index automatically updated** at every file change and across sessions. **Multi-agent ready** — multiple AI agents can work on the same codebase simultaneously, sharing a single index with automatic coordination and zero configuration.
 
@@ -54,6 +54,7 @@ The first Qdrant‑based MCP/Claude Plugin/Skill that pairs auto‑managed, zero
 ## Contents
 
 - [Quick Start](#quick-start)
+- [Plugins](#plugins)
 - [Why SocratiCode](#why-socraticode)
 - [Features](#features)
 - [Prerequisites](#prerequisites)
@@ -151,6 +152,39 @@ Restart your host. On first use SocratiCode automatically pulls Docker images, s
 > **Claude Code users**: If you installed the SocratiCode plugin, the Agent Instructions are included automatically as skills — no need to add them to your `CLAUDE.md`. The plugin also bundles the MCP server, so you don't need a separate `claude mcp add`.
 
 > **Advanced**: cloud embeddings (OpenAI / Google), external Qdrant, remote Ollama, native Ollama, and dozens of tuning options are all available. See [Configuration](#configuration) below.
+
+## Plugins
+
+SocratiCode is available as a native plugin on multiple AI coding platforms. Plugins bundle the MCP server with workflow skills and agent instructions — one install gives you everything.
+
+| Platform | Install method |
+|:---------|:---------------|
+| Claude Code | `claude plugin marketplace add giancarloerra/socraticode` — [full instructions](#claude-code-plugin-recommended-for-claude-code-users) |
+| Cursor | `/add-plugin https://github.com/giancarloerra/socraticode` |
+| VS Code Copilot | Command Palette → `Chat: Install Plugin From Source` → `https://github.com/giancarloerra/socraticode` |
+| Gemini CLI | `gemini extensions install https://github.com/giancarloerra/socraticode` |
+| OpenAI Codex | No public plugin directory yet — use the [MCP config](#quick-start) or [install locally](#codex-local-plugin-install) |
+
+> **VS Code Copilot**: The chat plugins feature is in preview. Enable it with `chat.plugins.enabled: true` in your VS Code settings.
+
+> **Codex local plugin install**: Clone the repo and register it in your personal plugin marketplace:
+> ```bash
+> git clone https://github.com/giancarloerra/socraticode.git ~/.agents/plugins/socraticode
+> ```
+> Then add it to `~/.agents/plugins/marketplace.json`:
+> ```json
+> {
+>   "plugins": [
+>     {
+>       "name": "socraticode",
+>       "path": "~/.agents/plugins/socraticode"
+>     }
+>   ]
+> }
+> ```
+> Codex will discover the plugin from `.codex-plugin/plugin.json` on next launch.
+
+> **All other MCP hosts** (Claude Desktop, Windsurf, Cline, Roo Code, OpenCode): Use the [MCP config](#quick-start) — works with any host that supports the MCP protocol.
 
 ## Why SocratiCode
 
