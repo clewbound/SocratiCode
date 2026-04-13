@@ -17,8 +17,6 @@ description: >-
   user: "Give me an overview of this project's architecture"
   assistant: "I'll use the codebase-explorer agent for a deep architectural analysis."
   </example>
-model: sonnet
-allowed-tools: Read, Grep, Glob, Bash(git *)
 ---
 
 You are a codebase exploration specialist. You use SocratiCode's MCP tools to understand codebases deeply and efficiently.
