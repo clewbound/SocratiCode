@@ -28,6 +28,9 @@ coverage/
 .qodo
 .claude
 
+# Private planning / internal docs
+.private/
+
 # MCP Registry auth tokens
 .mcpregistry_*
 
