@@ -21,6 +21,8 @@
 
 > *"There is only one good, knowledge, and one evil, ignorance."* — Socrates
 
+**Your AI reads code. SocratiCode understands it.**
+
 **Give any AI instant automated knowledge of your entire codebase (and infrastructure) — at scale, zero configuration, fully private, completely free.**
 
 <p align="center">
@@ -154,25 +156,37 @@ Restart your host. On first use SocratiCode automatically pulls Docker images, s
 
 I built SocratiCode because I regularly work on existing, large, and complex codebases across different languages and need to quickly understand them and act. Existing solutions were either too limited, insufficiently tested for production use, or bloated with unnecessary complexity. I wanted a single focused tool that does deep codebase intelligence well — zero setup, no bloat, fully automatic — and gets out of the way.
 
-- **True Zero Configuration** — Just install the Claude Plugin/Skill or add the MCP server to your AI host config. The server automatically pulls Docker images, starts Qdrant and Ollama containers, and downloads the embedding model on first use. No config files, no YAML, no environment variables to tune, no native dependencies to compile, no commands to type. Works everywhere Docker runs.
-- **Fully Private & Local by Default** — Everything runs on your machine. Your code never leaves your network. The default Docker setup includes Ollama and Qdrant with no external API calls. Optional cloud providers (Qdrant, OpenAI, Gemini) are available but never required.
-- **Language-Agnostic** — Works with every programming language, framework, and file type out of the box. No per-language parsers to install, no grammar files to maintain, no "unsupported language" limitations. If your AI can read it, SocratiCode can index it.
-- **Production-Grade Vector Search** — Built on Qdrant, a purpose-built vector database with HNSW indexing, concurrent read/write, and payload filtering. Collections store both a dense vector and a BM25 sparse vector per chunk; the Query API runs both sub-queries in a single round-trip and fuses results with RRF. Designed for scale vector search.
-- **Flexible Embedding Providers** — Switch between Local Ollama (private), Docker Ollama (zero-config), OpenAI (fastest), or Google Gemini (free tier) with a single environment variable. No provider-specific configuration files.
-- **Enterprise-Ready Simplicity** — No agent coordination tuning, no memory limit environment variables, no coordinator/conductor capacity knobs, no backpressure configuration. SocratiCode scales by relying on production-grade infrastructure (Qdrant, proven embedding APIs) rather than complex in-process orchestration.
-- **Multi-Agent Ready** — Multiple AI agents share a single index with zero configuration. Cross-process locking coordinates indexing and watching automatically — one agent indexes, all agents search, one watcher keeps everyone current. Crashed agents don't block others; stale locks are reclaimed automatically.
-- **Cross-Project & Branch-Aware** — Search across multiple related repositories in a single query via linked projects. Maintain separate indexes per git branch for CI/CD pipelines and PR review workflows. Results from linked projects are tagged with source labels and deduplicated automatically.
-- **Measurably better than grep** — On VS Code's 2.45M‑line codebase, SocratiCode answers architectural questions with **61% less data**, **84% fewer steps**, and **37× faster** response than a grep‑based AI agent. [Full benchmark →](#real-world-benchmark-vs-code-245m-lines-of-code-with-claude-opus-46)
+### Built-in Code Search vs SocratiCode
+
+| Feature | Claude Code | Cursor | VS Code Copilot | + SocratiCode |
+|:--------|:-----------:|:------:|:---------------:|:-------------:|
+| Text / grep search | ✅ | ✅ | ✅ | ✅ |
+| Semantic search | — | ✅ | ✅¹ | ✅ |
+| Hybrid search (fused) | — | — | — | ✅ |
+| Code dependency graph | — | — | ✅² | ✅ |
+| Circular dependency detection | — | — | — | ✅ |
+| Non-code knowledge (schemas, API specs) | — | — | — | ✅ |
+| Cross-project search | — | — | — | ✅ |
+| Branch-aware indexing | — | — | — | ✅ |
+| Multi-agent shared index | — | — | — | ✅ |
+| Fully local / private | ✅ | —³ | —⁴ | ✅ |
+| Resumable indexing | — | — | — | ✅ |
+| Live file watching | — | ✅ | — | ✅ |
+
+<sub>¹ VS Code Copilot: remote index via GitHub / Azure DevOps; local "External Ingest" gradually rolling out. ² LSP-based Find References / Go to Definition (Usages tool), not a full dependency graph. ³ Cursor: embeddings processed on Cursor servers (encrypted in transit and at rest). ⁴ VS Code Copilot: remote index hosted on GitHub / Azure DevOps. Sources: [Cursor docs](https://docs.cursor.com/context/codebase-indexing), [Claude Code docs](https://docs.anthropic.com/en/docs/claude-code/overview), [VS Code Copilot docs](https://code.visualstudio.com/docs/copilot/chat/codebase-context).</sub>
+
+On VS Code's 2.45M‑line codebase, SocratiCode answers architectural questions with **61% less data**, **84% fewer steps**, and **37× faster** response than a grep‑based AI agent. [Full benchmark →](#real-world-benchmark-vs-code-245m-lines-of-code-with-claude-opus-46)
 
 ## Features
 
-- **Hybrid code search** — Combines dense vector (semantic) search with BM25 lexical search, merged via Reciprocal Rank Fusion (RRF). Semantic search handles conceptual queries like "authentication middleware" even when those exact words don't appear in the code. BM25 handles exact identifier and keyword lookups that dense models struggle to rank precisely. RRF merges both result sets automatically — you get the best of both in every query with no tuning required.
+- **Hybrid code search** — Built on Qdrant, a purpose-built vector database with HNSW indexing, concurrent read/write, and payload filtering. Each chunk stores both a dense vector and a BM25 sparse vector; the Query API runs both sub-queries in a single round-trip and fuses results with Reciprocal Rank Fusion (RRF). Semantic search handles conceptual queries like "authentication middleware" even when those exact words don't appear in the code. BM25 handles exact identifier and keyword lookups. You get the best of both in every query with no tuning required.
 - **Configurable Qdrant** — Use the built-in Docker Qdrant (default, zero config) or connect to your own instance (self-hosted, remote server, or Qdrant Cloud). Configure via `QDRANT_MODE`, `QDRANT_URL`, and `QDRANT_API_KEY` environment variables.
 - **Configurable Ollama** — Use the built-in Docker Ollama (default, zero config) or point to your own Ollama instance (native install -GPU access-, remote server, etc.). Configure via `OLLAMA_MODE`, `OLLAMA_URL`, `EMBEDDING_MODEL` and `EMBEDDING_DIMENSIONS` environment variables.
-- **Multi-provider embeddings** — Beyond Ollama, use OpenAI (`text-embedding-3-small`) or Google Generative AI (`gemini-embedding-001`) for cloud-based embeddings. Just set `EMBEDDING_PROVIDER` and your API key.
-- **Private & secure** — Everything runs locally. Embeddings via Ollama, vector storage via Qdrant. No API costs, no token limits. Suitable for air-gapped and on-premises environments.
+- **Multi-provider embeddings** — Switch between Local Ollama (private, GPU access), Docker Ollama (zero-config), OpenAI (`text-embedding-3-small`, fastest), or Google Gemini (`gemini-embedding-001`, free tier) with a single environment variable. No provider-specific configuration files.
+- **Private & secure** — Everything runs on your machine — your code never leaves your network. The default Docker setup includes Ollama (embeddings) and Qdrant (vector storage) with no external API calls. No API costs, no token limits. Suitable for air-gapped and on-premises environments. Optional cloud providers (OpenAI, Google Gemini, Qdrant Cloud) are available but never required.
 - **AST-aware chunking** — Files are split at function/class boundaries using AST parsing (ast-grep), not arbitrary line counts. This produces higher-quality search results. Falls back to line-based chunking for unsupported languages.
 - **Polyglot code dependency graph** — Static analysis of import/require/use/include statements using ast-grep for 18+ languages. No external tools like dependency-cruiser required. Detects circular dependencies and generates visual Mermaid diagrams.
+- **Language-agnostic** — Works with every programming language, framework, and file type out of the box. No per-language parsers to install, no grammar files to maintain, no "unsupported language" limitations. If your AI can read it, SocratiCode can index it.
 - **Incremental indexing** — After the first full index, only changed files are re-processed. Content hashes are persisted in Qdrant so state survives server restarts.
 - **Batched & resumable indexing** — Files are processed in batches of 50, with progress checkpointed to Qdrant after each batch. If the process crashes or is interrupted, the next run automatically resumes from where it left off — already-indexed files are skipped via hash comparison. This keeps peak memory low and makes indexing reliable even for very large codebases.
 - **Live file watching** — Optionally watch for file changes and keep the index updated in real time (debounced 2s). Watcher also invalidates the code graph cache.
@@ -183,7 +197,8 @@ I built SocratiCode because I regularly work on existing, large, and complex cod
 - **Respects ignore rules** — Honors all `.gitignore` files (root + nested), plus an optional `.socraticodeignore` for additional exclusions. Includes sensible built-in defaults. `.gitignore` processing can be disabled via `RESPECT_GITIGNORE=false`. Dot-directories (e.g. `.agent`) can be included via `INCLUDE_DOT_FILES=true`.
 - **Custom file extensions** — Projects with non-standard extensions (e.g. `.tpl`, `.blade`) can be included via `EXTRA_EXTENSIONS` env var or `extraExtensions` tool parameter. Works for both indexing and code graph.
 - **Configurable infrastructure** — All ports, hosts, and API keys are configurable via environment variables. Qdrant API key support for enterprise deployments.
-- **Auto-setup** — On first use, automatically checks Docker, pulls images, starts containers, and pulls the embedding model. Only prerequisite: Docker.
+- **Enterprise-ready simplicity** — No agent coordination tuning, no memory limit environment variables, no coordinator/conductor capacity knobs, no backpressure configuration. SocratiCode scales by relying on production-grade infrastructure (Qdrant, proven embedding APIs) rather than complex in-process orchestration.
+- **Auto-setup & zero configuration** — Just install the Claude Plugin/Skill or add the MCP server to your AI host config. On first use, the server automatically checks Docker, pulls images, starts Qdrant and Ollama containers, and downloads the embedding model. No config files, no YAML, no environment variables to tune, no native dependencies to compile. Works everywhere Docker runs.
 - **Session resume** — When reopening a previously indexed project, the file watcher starts automatically on first tool use (search, status, update, or graph query). It catches any changes made since the last session and keeps the index live — no manual action needed.
 - **Auto-start watcher** — The file watcher is automatically activated when you use any SocratiCode tool on an indexed project. It starts after `codebase_index` completes, after `codebase_update`, and on the first `codebase_search`, `codebase_status`, or graph query. You can also start it manually with `codebase_watch { action: "start" }` if needed.
 - **Auto-build code graph** — The code dependency graph is automatically built after indexing and rebuilt when watched files change. No need to call `codebase_graph_build` manually unless you want to force a rebuild.
