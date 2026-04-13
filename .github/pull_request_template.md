@@ -33,6 +33,7 @@
 - [ ] My code follows the existing code style and conventions
 - [ ] I have added/updated JSDoc comments where appropriate
 - [ ] I have updated documentation (README.md / DEVELOPER.md) if needed
+- [ ] I have addressed all [CodeRabbit](https://coderabbit.ai) review comments (or marked as resolved with explanation)
 - [ ] I have read the [Contributing Guide](../CONTRIBUTING.md)
 - [ ] I agree to the [Contributor License Agreement](../CLA.md)
 

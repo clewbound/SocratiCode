@@ -122,6 +122,7 @@ See [DEVELOPER.md](DEVELOPER.md) for the full architecture overview.
 ## Review Process
 
 - All PRs are reviewed by a maintainer
+- [CodeRabbit](https://coderabbit.ai) automatically reviews every PR — address or resolve all comments before requesting human review
 - CI must pass (tests + type checking)
 - One approval required to merge
 - Maintainers may request changes or suggest alternatives
