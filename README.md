@@ -23,7 +23,7 @@
 
 **Your AI reads code. SocratiCode understands it.**
 
-**Give any AI instant automated knowledge of your entire codebase (and infrastructure) — at scale, zero configuration, fully private, completely free.**
+**The open-source codebase context engine: give any AI instant automated knowledge of your entire codebase (and infrastructure) — at scale, zero configuration, fully private, completely free.**
 
 <p align="center">
   Kindly sponsored by <a href="https://altaire.com">Altaire Limited</a>
