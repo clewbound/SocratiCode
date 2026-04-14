@@ -17,6 +17,7 @@
 
 import { createHash } from "node:crypto";
 import fsp from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { glob } from "glob";
 import { contextCollectionName, projectIdFromPath } from "../config.js";
@@ -52,14 +53,27 @@ export interface SocratiCodeConfig {
  */
 export async function loadConfig(projectPath: string): Promise<SocratiCodeConfig | null> {
   const configPath = path.join(path.resolve(projectPath), CONFIG_FILENAME);
+  // Fall back to a global config location when no project-level config exists.
+  // Configurable via env var SOCRATICODE_GLOBAL_CONFIG_DIR; defaults to ~/.claude/arch.
+  const globalConfigDir =
+    process.env.SOCRATICODE_GLOBAL_CONFIG_DIR || path.join(os.homedir(), ".claude", "arch");
+  const globalConfigPath = path.join(globalConfigDir, CONFIG_FILENAME);
+  let actualPath = configPath;
+  let usingGlobalFallback = false;
 
   try {
     await fsp.access(configPath);
   } catch {
-    return null; // file doesn't exist — that's fine
+    try {
+      await fsp.access(globalConfigPath);
+      actualPath = globalConfigPath;
+      usingGlobalFallback = true;
+    } catch {
+      return null; // neither project nor global file exists — that's fine
+    }
   }
 
-  const raw = await fsp.readFile(configPath, "utf-8");
+  const raw = await fsp.readFile(actualPath, "utf-8");
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
@@ -107,6 +121,17 @@ export async function loadConfig(projectPath: string): Promise<SocratiCodeConfig
       }
       names.add(normalized);
     }
+  }
+
+  // When config was loaded from the global fallback directory, resolve relative
+  // artifact paths against that directory so downstream code (which assumes
+  // project-root resolution) receives correct absolute paths.
+  if (usingGlobalFallback && Array.isArray(config.artifacts)) {
+    const baseDir = path.dirname(actualPath);
+    config.artifacts = (config.artifacts as ContextArtifact[]).map((artifact) => ({
+      ...artifact,
+      path: path.isAbsolute(artifact.path) ? artifact.path : path.resolve(baseDir, artifact.path),
+    }));
   }
 
   return config as SocratiCodeConfig;
