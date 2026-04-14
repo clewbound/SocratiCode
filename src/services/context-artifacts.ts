@@ -59,6 +59,7 @@ export async function loadConfig(projectPath: string): Promise<SocratiCodeConfig
     process.env.SOCRATICODE_GLOBAL_CONFIG_DIR || path.join(os.homedir(), ".claude", "arch");
   const globalConfigPath = path.join(globalConfigDir, CONFIG_FILENAME);
   let actualPath = configPath;
+  let usingGlobalFallback = false;
 
   try {
     await fsp.access(configPath);
@@ -66,6 +67,7 @@ export async function loadConfig(projectPath: string): Promise<SocratiCodeConfig
     try {
       await fsp.access(globalConfigPath);
       actualPath = globalConfigPath;
+      usingGlobalFallback = true;
     } catch {
       return null; // neither project nor global file exists — that's fine
     }
@@ -119,6 +121,17 @@ export async function loadConfig(projectPath: string): Promise<SocratiCodeConfig
       }
       names.add(normalized);
     }
+  }
+
+  // When config was loaded from the global fallback directory, resolve relative
+  // artifact paths against that directory so downstream code (which assumes
+  // project-root resolution) receives correct absolute paths.
+  if (usingGlobalFallback && Array.isArray(config.artifacts)) {
+    const baseDir = path.dirname(actualPath);
+    config.artifacts = (config.artifacts as ContextArtifact[]).map((artifact) => ({
+      ...artifact,
+      path: path.isAbsolute(artifact.path) ? artifact.path : path.resolve(baseDir, artifact.path),
+    }));
   }
 
   return config as SocratiCodeConfig;

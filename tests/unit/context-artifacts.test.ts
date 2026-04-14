@@ -42,8 +42,19 @@ async function createTempProject(
 describe("loadConfig", () => {
   it("returns null when no .socraticodecontextartifacts.json exists", async () => {
     const projectDir = await createTempProject({ "README.md": "# Hello" });
-    const config = await loadConfig(projectDir);
-    expect(config).toBeNull();
+    // Point global fallback to a non-existent directory so we only test project-level
+    const originalEnv = process.env.SOCRATICODE_GLOBAL_CONFIG_DIR;
+    process.env.SOCRATICODE_GLOBAL_CONFIG_DIR = path.join(tempDir, "nonexistent-global");
+    try {
+      const config = await loadConfig(projectDir);
+      expect(config).toBeNull();
+    } finally {
+      if (originalEnv === undefined) {
+        delete process.env.SOCRATICODE_GLOBAL_CONFIG_DIR;
+      } else {
+        process.env.SOCRATICODE_GLOBAL_CONFIG_DIR = originalEnv;
+      }
+    }
   });
 
   it("parses a valid .socraticodecontextartifacts.json", async () => {
@@ -144,6 +155,118 @@ describe("loadConfig", () => {
       }),
     });
     await expect(loadConfig(projectDir)).rejects.toThrow("description must be a non-empty string");
+  });
+
+  it("falls back to global config when project-level config is absent", async () => {
+    const projectDir = await createTempProject({ "README.md": "# Hello" });
+    // Create a global config directory with a config file
+    const globalDir = path.join(tempDir, `global-${Date.now()}`);
+    await fsp.mkdir(globalDir, { recursive: true });
+    await fsp.writeFile(
+      path.join(globalDir, ".socraticodecontextartifacts.json"),
+      JSON.stringify({
+        artifacts: [
+          { name: "shared-schema", path: "./shared/schema.sql", description: "Shared DB schema" },
+        ],
+      }),
+    );
+
+    // Override the env var to point to our temp global dir
+    const originalEnv = process.env.SOCRATICODE_GLOBAL_CONFIG_DIR;
+    process.env.SOCRATICODE_GLOBAL_CONFIG_DIR = globalDir;
+    try {
+      const config = await loadConfig(projectDir);
+      expect(config).not.toBeNull();
+      expect(config?.artifacts).toHaveLength(1);
+      expect(config?.artifacts?.[0].name).toBe("shared-schema");
+    } finally {
+      if (originalEnv === undefined) {
+        delete process.env.SOCRATICODE_GLOBAL_CONFIG_DIR;
+      } else {
+        process.env.SOCRATICODE_GLOBAL_CONFIG_DIR = originalEnv;
+      }
+    }
+  });
+
+  it("resolves relative artifact paths against global config dir when using fallback", async () => {
+    const projectDir = await createTempProject({ "README.md": "# Hello" });
+    const globalDir = path.join(tempDir, `global-resolve-${Date.now()}`);
+    await fsp.mkdir(globalDir, { recursive: true });
+    await fsp.writeFile(
+      path.join(globalDir, ".socraticodecontextartifacts.json"),
+      JSON.stringify({
+        artifacts: [
+          { name: "relative-art", path: "docs/schema.sql", description: "Relative path artifact" },
+          { name: "absolute-art", path: "/absolute/path/schema.sql", description: "Absolute path artifact" },
+        ],
+      }),
+    );
+
+    const originalEnv = process.env.SOCRATICODE_GLOBAL_CONFIG_DIR;
+    process.env.SOCRATICODE_GLOBAL_CONFIG_DIR = globalDir;
+    try {
+      const config = await loadConfig(projectDir);
+      expect(config).not.toBeNull();
+      // Relative path should be resolved against globalDir, not projectDir
+      expect(path.isAbsolute(config!.artifacts![0].path)).toBe(true);
+      expect(config!.artifacts![0].path).toBe(path.resolve(globalDir, "docs/schema.sql"));
+      // Absolute path should remain unchanged
+      expect(config!.artifacts![1].path).toBe("/absolute/path/schema.sql");
+    } finally {
+      if (originalEnv === undefined) {
+        delete process.env.SOCRATICODE_GLOBAL_CONFIG_DIR;
+      } else {
+        process.env.SOCRATICODE_GLOBAL_CONFIG_DIR = originalEnv;
+      }
+    }
+  });
+
+  it("does NOT resolve relative paths when using project-level config", async () => {
+    const projectDir = await createTempProject({
+      ".socraticodecontextartifacts.json": JSON.stringify({
+        artifacts: [
+          { name: "local-schema", path: "./schema.sql", description: "Local schema" },
+        ],
+      }),
+    });
+    const config = await loadConfig(projectDir);
+    expect(config).not.toBeNull();
+    // Project-level config should keep relative paths as-is (resolved downstream)
+    expect(config!.artifacts![0].path).toBe("./schema.sql");
+  });
+
+  it("prefers project-level config over global config", async () => {
+    const globalDir = path.join(tempDir, `global-priority-${Date.now()}`);
+    await fsp.mkdir(globalDir, { recursive: true });
+    await fsp.writeFile(
+      path.join(globalDir, ".socraticodecontextartifacts.json"),
+      JSON.stringify({
+        artifacts: [
+          { name: "global-schema", path: "./global.sql", description: "Global" },
+        ],
+      }),
+    );
+    const projectDir = await createTempProject({
+      ".socraticodecontextartifacts.json": JSON.stringify({
+        artifacts: [
+          { name: "project-schema", path: "./project.sql", description: "Project" },
+        ],
+      }),
+    });
+
+    const originalEnv = process.env.SOCRATICODE_GLOBAL_CONFIG_DIR;
+    process.env.SOCRATICODE_GLOBAL_CONFIG_DIR = globalDir;
+    try {
+      const config = await loadConfig(projectDir);
+      expect(config).not.toBeNull();
+      expect(config?.artifacts?.[0].name).toBe("project-schema");
+    } finally {
+      if (originalEnv === undefined) {
+        delete process.env.SOCRATICODE_GLOBAL_CONFIG_DIR;
+      } else {
+        process.env.SOCRATICODE_GLOBAL_CONFIG_DIR = originalEnv;
+      }
+    }
   });
 
   it("throws on duplicate artifact names (case-insensitive)", async () => {

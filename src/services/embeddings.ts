@@ -9,14 +9,14 @@ import { logger } from "./logger.js";
 // Configurable via env var EMBEDDING_BATCH_SIZE (positive integer); defaults to 32.
 const BATCH_SIZE: number = (() => {
   const raw = process.env.EMBEDDING_BATCH_SIZE;
-  if (!raw) return 32;
-  const parsed = Number.parseInt(raw, 10);
-  if (!Number.isFinite(parsed) || parsed <= 0) {
+  if (raw === undefined) return 32;
+  const num = Number(raw);
+  if (!Number.isInteger(num) || num <= 0) {
     throw new Error(
       `Invalid EMBEDDING_BATCH_SIZE: "${raw}". Must be a positive integer.`,
     );
   }
-  return parsed;
+  return num;
 })();
 const MAX_RETRIES = 3;
 const BASE_DELAY_MS = 500;
