@@ -47,7 +47,7 @@
   "bugs": {
     "url": "https://github.com/giancarloerra/socraticode/issues"
   },
-  "homepage": "https://github.com/giancarloerra/socraticode#readme",
+  "homepage": "https://socraticode.cloud",
   "license": "AGPL-3.0-only",
   "files": [
     "dist",

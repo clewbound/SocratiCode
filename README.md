@@ -10,6 +10,7 @@
   <a href="https://www.npmjs.com/package/socraticode"><img src="https://img.shields.io/npm/v/socraticode.svg" alt="npm version"></a>
   <a href="https://nodejs.org/"><img src="https://img.shields.io/badge/node-%3E%3D18-brightgreen.svg" alt="Node.js >= 18"></a>
   <a href="https://github.com/giancarloerra/socraticode"><img src="https://img.shields.io/github/stars/giancarloerra/socraticode?style=social" alt="GitHub stars"></a>
+  <a href="https://discord.gg/5DrMXfNG"><img src="https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white" alt="Discord"></a>
 </p>
 
 <p align="center">
@@ -30,12 +31,16 @@
 </p>
 
 > If SocratiCode has been useful to you, please ⭐ **star this repo** — it helps others discover it — and share it with your dev team and fellow developers!
+>
+> 💬 Questions or just want to chat? Join us on [Discord](https://discord.gg/5DrMXfNG).
 
 **One thing, done well: deep codebase intelligence — zero setup, no bloat, fully automatic.** SocratiCode gives AI assistants deep semantic understanding of your codebase — hybrid search, cross-project search, polyglot code dependency graphs, and searchable context artifacts (database schemas, API specs, infra configs, architecture docs). Zero configuration — add it to **any MCP host**, or install the native **plugin** for Claude Code, Cursor, VS Code Copilot, Codex or Gemini CLI. It manages everything automatically.
 
 **Production-ready**, battle-tested on **enterprise-level** large repositories (up to and over **~40 million lines of code**). **Batched**, automatic **resumable** indexing checkpoints progress — pauses, crashes, restarts, and interruptions don't lose work. The file watcher keeps the **index automatically updated** at every file change and across sessions. **Multi-agent ready** — multiple AI agents can work on the same codebase simultaneously, sharing a single index with automatic coordination and zero configuration.
 
 **Private and local by default** — Docker handles everything, no API keys required, no data leaves your machine. **Cloud ready** for embeddings (OpenAI, Google Gemini) and Qdrant, and a **full suite of configuration options** are all available when you need them.
+
+> **☁️ SocratiCode Cloud (private beta)** — Hosted, shared team index built on the same engine as the open-source version, plus SSO, audit logs, branch-aware indexing, and VPC / air-gapped deployment options. The open-source core remains free forever. [Request early access →](https://socraticode.cloud)
 
 The first Qdrant‑based MCP/Claude Plugin/Skill that pairs auto‑managed, zero‑config local Docker deployment with **AST‑aware code chunking, hybrid semantic + BM25 (RRF‑fused) code search**, polyglot dependency **graphs** with circular‑dependency visualization, and searchable **infra/API/database artifacts** in a single focused, zero-config and easy to use code intelligence engine.
 
@@ -69,6 +74,8 @@ The first Qdrant‑based MCP/Claude Plugin/Skill that pairs auto‑managed, zero
 - [Testing](#testing)
 - [Why Not Just Grep?](#why-not-just-grep)
 - [FAQ](#faq)
+- [Community](#community)
+- [SocratiCode Cloud](#socraticode-cloud)
 - [License](#license)
 
 ---
@@ -203,11 +210,14 @@ I built SocratiCode because I regularly work on existing, large, and complex cod
 | Cross-project search | — | — | — | ✅ |
 | Branch-aware indexing | — | — | — | ✅ |
 | Multi-agent shared index | — | — | — | ✅ |
+| Tool-independent (survives switching AI) | — | — | — | ✅ |
 | Fully local / private | ✅ | —³ | —⁴ | ✅ |
 | Resumable indexing | — | — | — | ✅ |
 | Live file watching | — | ✅ | — | ✅ |
 
 <sub>¹ VS Code Copilot: remote index via GitHub / Azure DevOps; local "External Ingest" gradually rolling out. ² LSP-based Find References / Go to Definition (Usages tool), not a full dependency graph. ³ Cursor: embeddings processed on Cursor servers (encrypted in transit and at rest). ⁴ VS Code Copilot: remote index hosted on GitHub / Azure DevOps. Sources: [Cursor docs](https://docs.cursor.com/context/codebase-indexing), [Claude Code docs](https://docs.anthropic.com/en/docs/claude-code/overview), [VS Code Copilot docs](https://code.visualstudio.com/docs/copilot/chat/codebase-context).</sub>
+
+> **🔌 The context lives with your codebase, not with the assistant.** Built-in indexes (Cursor's, Copilot's) are tied to that one tool — switch assistants and you start from scratch. SocratiCode is independent: index once, then plug it into Claude Code, Cursor, Copilot, Windsurf, your own private model, or all of them at once. They share the same understanding of your code.
 
 On VS Code's 2.45M‑line codebase, SocratiCode answers architectural questions with **61% less data**, **84% fewer steps**, and **37× faster** response than a grep‑based AI agent. [Full benchmark →](#real-world-benchmark-vs-code-245m-lines-of-code-with-claude-opus-46)
 
@@ -1064,6 +1074,35 @@ model. Projects you haven't touched are unaffected.
 
 The code you see behind Socrates is part of the original Apollo 11 guidance computer (AGC) source code for Command Module (Comanche055)!
 
+
+## Community
+
+- 💬 **[Discord](https://discord.gg/5DrMXfNG)** — chat with users and maintainers, ask "how do I…", share what you're building
+- 🐛 **[GitHub Issues](https://github.com/giancarloerra/socraticode/issues)** — bug reports and confirmed feature requests (please use the templates)
+- 📣 **Releases** — *Watch* the repo (top-right on GitHub → *Custom* → *Releases*) to be notified of new versions
+
+If SocratiCode is useful to you, the single most helpful thing you can do is ⭐ **star the repo** — it's how others discover the project.
+
+---
+
+## SocratiCode Cloud
+
+The full SocratiCode engine is — and will remain — free and open-source under AGPL-3.0. **SocratiCode Cloud** is an optional hosted version on top of the same engine, currently in **private beta**, for teams that want shared, managed, compliant infrastructure.
+
+What Cloud adds on top of the OSS engine:
+
+- **Shared team index** — every developer searches the same data, auto-indexed on every push across every branch
+- **Cross-repo search** — query every repository your organisation owns in one call
+- **SSO / SAML, audit logs, IP allowlisting** — built in, not a later upsell
+- **Deployment models** — managed cloud (EU/US), your own VPC (AWS/GCP/Azure), or fully air-gapped on-prem
+- **Web dashboard** — search, dependency graphs, artefacts, team and repo management
+- **Zero local infrastructure** — no Docker, no Qdrant, no Ollama for the team to manage
+
+Currently onboarding a small number of engineering teams. **[Request early access →](https://socraticode.cloud)**
+
+> The open-source engine in this repository is and will always be the same engine that powers Cloud. No bait-and-switch, no feature gating of the OSS core. Cloud only adds the team, deployment and compliance layer around it.
+
+---
 
 ## License
 
