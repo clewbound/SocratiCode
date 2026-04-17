@@ -4,6 +4,12 @@ All notable changes to SocratiCode are documented here.
 This project uses [Conventional Commits](https://www.conventionalcommits.org/) and [Semantic Versioning](https://semver.org/).
 
 
+## [1.6.1](https://github.com/giancarloerra/socraticode/compare/v1.6.0...v1.6.1) (2026-04-17)
+
+### Documentation
+
+* add Zed support, per-IDE instruction paths, and strengthen graph triggers ([270d402](https://github.com/giancarloerra/socraticode/commit/270d402f48f6a87e966120ce264bbacd0a19c9a7))
+
 ## [1.6.0](https://github.com/giancarloerra/socraticode/compare/v1.5.0...v1.6.0) (2026-04-16)
 
 ### Features
