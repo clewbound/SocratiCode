@@ -860,6 +860,56 @@ Artifacts are chunked and embedded into Qdrant using the same hybrid dense + BM2
 3. **Re-index**: `codebase_context_index` — force re-index (usually not needed, auto-indexing handles it)
 4. **Clean up**: `codebase_context_remove` — remove all indexed artifacts
 
+### Why this matters: real workflow examples
+
+Without artifacts, the agent only sees source code. With artifacts, it has the full picture and writes code that fits your project from the start.
+
+**Database schema** — You ask *"add a last_login timestamp to users."* The agent runs `codebase_context_search` for "users table", finds the schema uses `snake_case` columns and every table has an `updated_at` with a trigger. The migration it writes matches existing conventions instead of guessing.
+
+```json
+{
+  "name": "database-schema",
+  "path": "./docs/schema.sql",
+  "description": "Complete PostgreSQL schema — all tables, columns, types, constraints, indexes, and triggers. Check this before writing migrations to match naming conventions and existing patterns."
+}
+```
+
+**API spec** — You ask *"add a GET endpoint for user preferences."* The agent searches the OpenAPI spec, sees all endpoints use Bearer auth, return `{ data, meta }` wrappers, and paginate with `cursor`/`limit`. The new endpoint follows the same patterns automatically.
+
+```json
+{
+  "name": "api-spec",
+  "path": "./docs/openapi.yaml",
+  "description": "OpenAPI 3.0 spec for the REST API — all endpoints, request/response schemas, auth, pagination. Check this before adding or modifying endpoints to match existing conventions."
+}
+```
+
+**Domain glossary (DDD)** — You ask *"add a way to cancel an order."* The agent searches your domain glossary, finds that cancellation is modeled as an `OrderVoided` event (not "cancelled"), that only orders in `Confirmed` status can be voided, and that the `Fulfillment` bounded context must be notified. The implementation uses the correct domain terms and integrates with the right bounded contexts.
+
+```json
+{
+  "artifacts": [
+    {
+      "name": "ubiquitous-language",
+      "path": "./docs/ubiquitous-language.md",
+      "description": "Domain glossary — bounded context terms, their definitions, and relationships. Always check this before naming entities, events, or commands to use the correct domain language."
+    },
+    {
+      "name": "context-map",
+      "path": "./docs/context-mapping.md",
+      "description": "Bounded context map — context boundaries, relationships (shared kernel, customer-supplier, etc.), and integration patterns. Check before implementing cross-context communication."
+    },
+    {
+      "name": "event-storming",
+      "path": "./docs/event-storming/",
+      "description": "Event storming output — domain events, commands, aggregates, policies, and read models. Check before adding new domain behavior to see how it fits the existing event flows."
+    }
+  ]
+}
+```
+
+> **The `description` field is the key lever.** It tells the AI not just *what* the artifact is, but *when to consult it*. Write descriptions that say "check this before doing X" so the agent reaches for the artifact at the right moment.
+
 ### Example artifacts
 
 | Category | Examples |
