@@ -17,6 +17,14 @@ This project uses [Conventional Commits](https://www.conventionalcommits.org/) a
 * **Symbol graph builds automatically** alongside the file-import graph during `codebase_index` and `codebase_graph_build`. `codebase_graph_status` now reports symbol graph stats (files / symbols / edges / unresolved%).
 * **Symbol graph removed** automatically when `codebase_graph_remove` is called.
 
+### Bug Fixes
+
+* **Java/Kotlin/Swift/Scala symbol extraction silently failed.** ast-grep throws "Invalid Kind" for grammars where a queried node kind doesn't exist (e.g. `object_declaration` is Kotlin-only, not Java). The outer try/catch in `extractSymbolsAndCalls` swallowed the error and returned only the `<module>` symbol, so 17 of 20 supported languages could regress without any test failure. Fixed via a `safeFindAll(node, kind)` wrapper applied to all 36 call sites in `services/graph-symbols.ts`. Added 14 per-language regression tests covering Rust, Java/Kotlin/Scala, C#, C/C++, Ruby, PHP, Swift, Bash, and the regex fallback path.
+
+### Known Limitations
+
+* **Watcher path still triggers a full symbol-graph rebuild on each save.** The per-file incremental update API (`updateChangedFilesSymbolGraph` in `services/symbol-graph-incremental.ts`) is implemented and integration-tested, but is not yet wired into `services/indexer.ts:updateProjectIndex` because that requires splitting `rebuildGraph` into "file-import only" + "symbol graph optional" modes. On large repos prefer deliberate `codebase_update` invocations over the auto-watcher when symbol-graph freshness matters. Tracked as a Phase F follow-up.
+
 
 ## [1.6.1](https://github.com/giancarloerra/socraticode/compare/v1.6.0...v1.6.1) (2026-04-17)
 

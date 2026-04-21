@@ -861,6 +861,22 @@ TypeScript / JavaScript / TSX, Python, Go, Rust, Java, Kotlin, Scala, C#, C, C++
 
 `SymbolGraphMeta.unresolvedEdgePct` exposes how much of the call graph is fuzzy — useful as a quality signal.
 
+#### Per-file incremental updates (Phase F)
+
+`services/symbol-graph-incremental.ts` exports `updateChangedFilesSymbolGraph(projectId, projectPath, fileGraph, changedRelPaths, removedRelPaths)`. Given a freshly-rebuilt file-import graph and a small list of changed/removed paths, it:
+
+1. Re-extracts symbols + raw calls for each changed file.
+2. Resolves calls best-effort against the supplied file-import graph (cross-file edges may be left `unresolved` until the next full rebuild — acceptable for the watcher hot path).
+3. Diffs against the previously persisted file payload (using `contentHash`) and patches only the affected name shards (≤27) and reverse-call shards (≤256).
+4. Updates the `SymbolGraphMeta` counts incrementally (`builtAt` refreshed; `unresolvedEdgePct` is left as-is until the next full rebuild).
+5. Returns `fullRebuildRequired: true` if no meta exists — the caller is then expected to fall back to a full `rebuildGraph()`.
+
+**Wiring status**: the API and its integration tests (`tests/integration/symbol-graph-incremental.test.ts`) are in place and green. The watcher path (`services/watcher.ts` → `services/indexer.ts:updateProjectIndex`) **still triggers a full `rebuildGraph()` on every save**. Splitting `rebuildGraph` into "file-import only" + "symbol graph optional" is a follow-up refactor — until that ships, large repos should rely on deliberate `codebase_update` invocations rather than the auto-watcher for symbol-graph freshness. Tracked in `CHANGELOG.md` as a known limitation.
+
+#### Scale & smoke benchmarks
+
+`tests/unit/symbol-graph-scale.test.ts` runs CPU-only synthetic benchmarks against the sharding/hashing layer at 10k–100k symbol volumes. Thresholds are intentionally loose (>10× regression to fail) — the goal is to catch order-of-magnitude regressions before they reach a real codebase, not micro-benchmark stability. Real-world numbers (Qdrant round-trips, end-to-end build time on N-thousand-file projects) are not pinned in CI; see the integration suite for the closest approximation.
+
 ### graph-analysis.ts
 
 | Function | Signature | Description |

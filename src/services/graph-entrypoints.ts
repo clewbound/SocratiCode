@@ -125,7 +125,12 @@ function detectFrameworkReasons(
   // Test functions: names starting with `test_`, `Test`, or matching `it`/`describe`
   for (const s of p.symbols) {
     if (s.name === "<module>") continue;
-    if (/^test[_A-Z]/.test(s.name) || /^Test[A-Z_]/.test(s.name)) {
+    if (
+      /^test[_A-Z]/.test(s.name) ||
+      /^Test[A-Z_]/.test(s.name) ||
+      s.name === "it" ||
+      s.name === "describe"
+    ) {
       out.push({ symbol: s, reason: "test" });
     }
   }

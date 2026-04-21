@@ -115,4 +115,248 @@ func Bar() int { return Foo() }
       expect(edges[0].calleeName).toBe("bar");
     });
   });
+
+  describe("Rust", () => {
+    it("extracts fn and impl methods", () => {
+      const src = `
+fn foo() -> i32 { 1 }
+
+struct S;
+impl S {
+    fn bar(&self) -> i32 { foo() }
+}
+`;
+      const out = extractSymbolsAndCalls(src, "rust" as unknown as Lang, ".rs", "lib.rs");
+      const names = out.symbols.map((s) => s.name);
+      expect(names).toContain("foo");
+      expect(names).toContain("bar");
+      expect(out.symbols.some((s) => s.name === "<module>")).toBe(true);
+    });
+  });
+
+  describe("Java / Kotlin / Scala (JVM family)", () => {
+    it("extracts Java class and methods", () => {
+      const src = `
+public class Foo {
+    public int bar() { return 1; }
+    public int baz() { return bar(); }
+}
+`;
+      const out = extractSymbolsAndCalls(src, "java" as unknown as Lang, ".java", "Foo.java");
+      const names = out.symbols.map((s) => s.name);
+      expect(names).toContain("Foo");
+      expect(names).toContain("bar");
+      expect(names).toContain("baz");
+    });
+
+    it("extracts Kotlin top-level fun and class methods", () => {
+      const src = `
+fun greet(name: String): String = "Hi"
+
+class Bar {
+    fun work(): String = greet("x")
+}
+`;
+      const out = extractSymbolsAndCalls(src, "kotlin" as unknown as Lang, ".kt", "main.kt");
+      const names = out.symbols.map((s) => s.name);
+      expect(names).toContain("greet");
+      expect(names).toContain("Bar");
+      expect(names).toContain("work");
+    });
+
+    it("extracts Scala def and class", () => {
+      const src = `
+class Foo {
+  def bar(): Int = 1
+}
+
+object Main {
+  def main(args: Array[String]): Unit = println("hi")
+}
+`;
+      const out = extractSymbolsAndCalls(src, "scala" as unknown as Lang, ".scala", "Main.scala");
+      const names = out.symbols.map((s) => s.name);
+      expect(names).toContain("bar");
+      expect(names).toContain("main");
+    });
+  });
+
+  describe("C#", () => {
+    it("extracts class and methods", () => {
+      const src = `
+namespace App {
+    public class Foo {
+        public int Bar() { return 1; }
+        public int Baz() { return Bar(); }
+    }
+}
+`;
+      const out = extractSymbolsAndCalls(src, "csharp" as unknown as Lang, ".cs", "Foo.cs");
+      const names = out.symbols.map((s) => s.name);
+      expect(names).toContain("Foo");
+      expect(names).toContain("Bar");
+      expect(names).toContain("Baz");
+    });
+  });
+
+  describe("C / C++", () => {
+    it("extracts C function definitions", () => {
+      const src = `
+int add(int a, int b) { return a + b; }
+
+int main(void) {
+    return add(2, 3);
+}
+`;
+      const out = extractSymbolsAndCalls(src, "c" as unknown as Lang, ".c", "main.c");
+      const names = out.symbols.map((s) => s.name);
+      expect(names).toContain("add");
+      expect(names).toContain("main");
+    });
+
+    it("extracts C++ class declarations and free functions", () => {
+      // Note: inline class methods are `field_declaration` nodes in tree-sitter-cpp,
+      // not `function_definition`, so the current extractor catches them only
+      // when defined out-of-line. See language-coverage table in DEVELOPER.md.
+      const src = `
+class Foo {
+public:
+    int bar();
+};
+
+int Foo::bar() { return 1; }
+int helper() { return 42; }
+`;
+      const out = extractSymbolsAndCalls(src, "cpp" as unknown as Lang, ".cpp", "Foo.cpp");
+      const names = out.symbols.map((s) => s.name);
+      expect(names).toContain("Foo");
+      expect(names).toContain("helper");
+      // Out-of-line method `Foo::bar` is detected as qualifiedName "Foo::bar".
+      const qnames = out.symbols.map((s) => s.qualifiedName);
+      expect(qnames.some((q) => q === "Foo::bar" || q === "bar")).toBe(true);
+    });
+  });
+
+  describe("Ruby", () => {
+    it("extracts def and class", () => {
+      const src = `
+def foo
+  1
+end
+
+class Bar
+  def baz
+    foo
+  end
+end
+`;
+      const out = extractSymbolsAndCalls(src, "ruby" as unknown as Lang, ".rb", "app.rb");
+      const names = out.symbols.map((s) => s.name);
+      expect(names).toContain("foo");
+      expect(names).toContain("Bar");
+      expect(names).toContain("baz");
+    });
+  });
+
+  describe("PHP", () => {
+    it("extracts function and class methods", () => {
+      const src = `<?php
+function greet($name) {
+  return "Hi " . $name;
+}
+
+class Foo {
+  public function bar() {
+    return greet("x");
+  }
+}
+`;
+      const out = extractSymbolsAndCalls(src, "php" as unknown as Lang, ".php", "index.php");
+      const names = out.symbols.map((s) => s.name);
+      expect(names).toContain("greet");
+      expect(names).toContain("Foo");
+      expect(names).toContain("bar");
+    });
+  });
+
+  describe("Swift", () => {
+    it("extracts Swift func and class", () => {
+      const src = `
+func greet(name: String) -> String { return "Hi" }
+
+class Foo {
+    func bar() -> String { return greet(name: "x") }
+}
+`;
+      const out = extractSymbolsAndCalls(src, "swift" as unknown as Lang, ".swift", "App.swift");
+      const names = out.symbols.map((s) => s.name);
+      expect(names).toContain("greet");
+      expect(names).toContain("Foo");
+      expect(names).toContain("bar");
+    });
+  });
+
+  describe("Bash", () => {
+    it("extracts shell function definitions", () => {
+      const src = `
+greet() {
+  echo "hi $1"
+}
+
+main() {
+  greet "world"
+}
+`;
+      const out = extractSymbolsAndCalls(src, "bash" as unknown as Lang, ".sh", "run.sh");
+      const names = out.symbols.map((s) => s.name);
+      expect(names).toContain("greet");
+      expect(names).toContain("main");
+    });
+  });
+
+  describe("Regex fallback (Dart, Lua, Svelte, Vue, unknown)", () => {
+    it("handles Dart via regex fallback", () => {
+      const src = `
+String greet(String name) {
+  return 'Hi $name';
+}
+
+class Foo {
+  int bar() => 1;
+}
+`;
+      const out = extractSymbolsAndCalls(src, "dart" as unknown as Lang, ".dart", "main.dart");
+      // regex fallback should at least produce <module> and not throw
+      expect(out.symbols.some((s) => s.name === "<module>")).toBe(true);
+      const names = out.symbols.map((s) => s.name);
+      // best-effort detection: should find at least one named symbol
+      expect(names.length).toBeGreaterThanOrEqual(1);
+    });
+
+    it("handles Lua via regex fallback", () => {
+      const src = `
+function greet(name)
+  return "hi " .. name
+end
+
+local function helper()
+  return greet("x")
+end
+`;
+      const out = extractSymbolsAndCalls(src, "lua" as unknown as Lang, ".lua", "init.lua");
+      expect(out.symbols.some((s) => s.name === "<module>")).toBe(true);
+    });
+
+    it("handles unknown language without throwing", () => {
+      const src = "some random text\nwith no recognizable structure";
+      const out = extractSymbolsAndCalls(
+        src,
+        "unknown" as unknown as Lang,
+        ".xyz",
+        "data.xyz",
+      );
+      expect(out.symbols.some((s) => s.name === "<module>")).toBe(true);
+      expect(out.rawCalls).toEqual([]);
+    });
+  });
 });

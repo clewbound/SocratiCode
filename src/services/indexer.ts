@@ -1189,6 +1189,13 @@ export async function updateProjectIndex(
   await saveProjectMetadata(collection, resolvedPath, currentFiles.length, hashes.size, hashes, "completed");
 
   // Auto-rebuild code graph if any files changed
+  // NOTE (Phase F follow-up): this still triggers a full symbol-graph rebuild
+  // on every save. The per-file incremental API in
+  // `services/symbol-graph-incremental.ts` (`updateChangedFilesSymbolGraph`)
+  // is unit-tested and ready, but is not yet wired in here because that
+  // requires splitting `rebuildGraph` into "file-import only" + "symbol
+  // graph optional" modes. Tracked as a follow-up; on large repos users
+  // should run `codebase_update` deliberately rather than via watcher.
   if (added > 0 || updated > 0 || removed > 0) {
     progress.phase = "building code graph";
     onProgress?.("Building code dependency graph...");

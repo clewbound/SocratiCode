@@ -28,6 +28,22 @@ function makeId(file: string, qualifiedName: string, line: number): string {
   return `${file}::${qualifiedName}#${line}`;
 }
 
+/**
+ * Wrapper around `node.findAll({rule:{kind}})` that swallows ast-grep
+ * "Invalid Kind" errors. Different language grammars expose different node
+ * kinds, so a kind that is valid for Kotlin (`object_declaration`) may be
+ * rejected by Java's grammar and abort the entire extraction. Logging is
+ * intentionally omitted at debug-level to avoid log spam on every file.
+ */
+// biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+function safeFindAll(node: any, kind: string): any[] {
+  try {
+    return node.findAll({ rule: { kind } });
+  } catch {
+    return [];
+  }
+}
+
 interface ScopeFrame {
   name: string;
   /** Line at which this scope begins (used to limit call-site attribution). */
@@ -136,7 +152,7 @@ function extractFromTsLike(
   const scopes: ScopeFrame[] = [];
 
   // Class declarations
-  for (const node of root.findAll({ rule: { kind: "class_declaration" } })) {
+  for (const node of safeFindAll(root, "class_declaration")) {
     const nameNode = node.find({ rule: { kind: "type_identifier" } })
       ?? node.find({ rule: { kind: "identifier" } });
     if (!nameNode) continue;
@@ -152,7 +168,7 @@ function extractFromTsLike(
     scopes.push({ name, startLine, endLine, symbolId: sym.id });
 
     // Methods inside the class
-    for (const m of node.findAll({ rule: { kind: "method_definition" } })) {
+    for (const m of safeFindAll(node, "method_definition")) {
       const mName = m.find({ rule: { kind: "property_identifier" } })?.text();
       if (!mName) continue;
       const mr = m.range();
@@ -171,7 +187,7 @@ function extractFromTsLike(
   }
 
   // Top-level function declarations
-  for (const node of root.findAll({ rule: { kind: "function_declaration" } })) {
+  for (const node of safeFindAll(root, "function_declaration")) {
     const nameNode = node.find({ rule: { kind: "identifier" } });
     if (!nameNode) continue;
     const name = nameNode.text();
@@ -187,7 +203,7 @@ function extractFromTsLike(
   }
 
   // Generator function declarations
-  for (const node of root.findAll({ rule: { kind: "generator_function_declaration" } })) {
+  for (const node of safeFindAll(root, "generator_function_declaration")) {
     const nameNode = node.find({ rule: { kind: "identifier" } });
     if (!nameNode) continue;
     const name = nameNode.text();
@@ -203,8 +219,8 @@ function extractFromTsLike(
   }
 
   // Named arrow functions: `const foo = (...) => {...}` or `const foo = function(...) {...}`
-  for (const node of root.findAll({ rule: { kind: "lexical_declaration" } })) {
-    for (const decl of node.findAll({ rule: { kind: "variable_declarator" } })) {
+  for (const node of safeFindAll(root, "lexical_declaration")) {
+    for (const decl of safeFindAll(node, "variable_declarator")) {
       const idNode = decl.find({ rule: { kind: "identifier" } });
       if (!idNode) continue;
       const name = idNode.text();
@@ -226,7 +242,7 @@ function extractFromTsLike(
 
   // Call sites
   const rawCalls: ExtractedSymbols["rawCalls"] = [];
-  for (const node of root.findAll({ rule: { kind: "call_expression" } })) {
+  for (const node of safeFindAll(root, "call_expression")) {
     const calleeName = extractCalleeNameJs(node.text());
     if (!calleeName) continue;
     const r = node.range();
@@ -264,7 +280,7 @@ function extractFromPython(
   const scopes: ScopeFrame[] = [];
 
   // Classes
-  for (const cls of root.findAll({ rule: { kind: "class_definition" } })) {
+  for (const cls of safeFindAll(root, "class_definition")) {
     const nameNode = cls.find({ rule: { kind: "identifier" } });
     if (!nameNode) continue;
     const className = nameNode.text();
@@ -279,7 +295,7 @@ function extractFromPython(
     scopes.push({ name: className, startLine, endLine, symbolId: csym.id });
 
     // Methods
-    for (const fn of cls.findAll({ rule: { kind: "function_definition" } })) {
+    for (const fn of safeFindAll(cls, "function_definition")) {
       const fnName = fn.find({ rule: { kind: "identifier" } })?.text();
       if (!fnName) continue;
       const fr = fn.range();
@@ -298,7 +314,7 @@ function extractFromPython(
   }
 
   // Top-level functions (those not nested inside classes)
-  for (const fn of root.findAll({ rule: { kind: "function_definition" } })) {
+  for (const fn of safeFindAll(root, "function_definition")) {
     const fnName = fn.find({ rule: { kind: "identifier" } })?.text();
     if (!fnName) continue;
     const r = fn.range();
@@ -316,7 +332,7 @@ function extractFromPython(
 
   // Calls
   const rawCalls: ExtractedSymbols["rawCalls"] = [];
-  for (const node of root.findAll({ rule: { kind: "call" } })) {
+  for (const node of safeFindAll(root, "call")) {
     const calleeName = extractCalleeNameJs(node.text());
     if (!calleeName) continue;
     const r = node.range();
@@ -342,7 +358,7 @@ function extractFromGo(
   const symbols: SymbolNode[] = [moduleSym];
   const scopes: ScopeFrame[] = [];
 
-  for (const fn of root.findAll({ rule: { kind: "function_declaration" } })) {
+  for (const fn of safeFindAll(root, "function_declaration")) {
     const nameNode = fn.find({ rule: { kind: "identifier" } });
     if (!nameNode) continue;
     const name = nameNode.text();
@@ -356,7 +372,7 @@ function extractFromGo(
     symbols.push(sym);
     scopes.push({ name, startLine, endLine, symbolId: sym.id });
   }
-  for (const fn of root.findAll({ rule: { kind: "method_declaration" } })) {
+  for (const fn of safeFindAll(root, "method_declaration")) {
     const nameNode = fn.find({ rule: { kind: "field_identifier" } });
     if (!nameNode) continue;
     const name = nameNode.text();
@@ -372,7 +388,7 @@ function extractFromGo(
   }
 
   const rawCalls: ExtractedSymbols["rawCalls"] = [];
-  for (const node of root.findAll({ rule: { kind: "call_expression" } })) {
+  for (const node of safeFindAll(root, "call_expression")) {
     const calleeName = extractCalleeNameJs(node.text());
     if (!calleeName) continue;
     const r = node.range();
@@ -397,7 +413,7 @@ function extractFromRust(
   const symbols: SymbolNode[] = [moduleSym];
   const scopes: ScopeFrame[] = [];
 
-  for (const fn of root.findAll({ rule: { kind: "function_item" } })) {
+  for (const fn of safeFindAll(root, "function_item")) {
     const nameNode = fn.find({ rule: { kind: "identifier" } });
     if (!nameNode) continue;
     const name = nameNode.text();
@@ -413,7 +429,7 @@ function extractFromRust(
   }
 
   const rawCalls: ExtractedSymbols["rawCalls"] = [];
-  for (const node of root.findAll({ rule: { kind: "call_expression" } })) {
+  for (const node of safeFindAll(root, "call_expression")) {
     const calleeName = extractCalleeNameJs(node.text());
     if (!calleeName) continue;
     const r = node.range();
@@ -423,7 +439,7 @@ function extractFromRust(
       calleeName, callSite: { file, line: callLine },
     });
   }
-  for (const node of root.findAll({ rule: { kind: "macro_invocation" } })) {
+  for (const node of safeFindAll(root, "macro_invocation")) {
     const nameNode = node.find({ rule: { kind: "identifier" } });
     if (!nameNode) continue;
     const r = node.range();
@@ -453,7 +469,7 @@ function extractFromJvm(
     ? ["class_definition", "object_definition", "trait_definition"]
     : ["class_declaration", "interface_declaration", "enum_declaration", "object_declaration"];
   for (const k of classKinds) {
-    for (const cls of root.findAll({ rule: { kind: k } })) {
+    for (const cls of safeFindAll(root, k)) {
       const nameNode = cls.find({ rule: { kind: "type_identifier" } })
         ?? cls.find({ rule: { kind: "identifier" } });
       if (!nameNode) continue;
@@ -479,7 +495,7 @@ function extractFromJvm(
       ? ["function_declaration"]
       : ["method_declaration", "constructor_declaration"];
   for (const k of methodKinds) {
-    for (const m of root.findAll({ rule: { kind: k } })) {
+    for (const m of safeFindAll(root, k)) {
       const nameNode = m.find({ rule: { kind: "identifier" } })
         ?? m.find({ rule: { kind: "simple_identifier" } });
       if (!nameNode) continue;
@@ -503,7 +519,7 @@ function extractFromJvm(
     : ["call_expression"];
   const rawCalls: ExtractedSymbols["rawCalls"] = [];
   for (const k of callKinds) {
-    for (const node of root.findAll({ rule: { kind: k } })) {
+    for (const node of safeFindAll(root, k)) {
       const calleeName = extractCalleeNameJs(node.text());
       if (!calleeName) continue;
       const r = node.range();
@@ -530,7 +546,7 @@ function extractFromCSharp(
   const scopes: ScopeFrame[] = [];
 
   for (const k of ["class_declaration", "interface_declaration", "record_declaration", "struct_declaration"]) {
-    for (const cls of root.findAll({ rule: { kind: k } })) {
+    for (const cls of safeFindAll(root, k)) {
       const nameNode = cls.find({ rule: { kind: "identifier" } });
       if (!nameNode) continue;
       const name = nameNode.text();
@@ -549,7 +565,7 @@ function extractFromCSharp(
     }
   }
   for (const k of ["method_declaration", "constructor_declaration"]) {
-    for (const m of root.findAll({ rule: { kind: k } })) {
+    for (const m of safeFindAll(root, k)) {
       const nameNode = m.find({ rule: { kind: "identifier" } });
       if (!nameNode) continue;
       const name = nameNode.text();
@@ -568,7 +584,7 @@ function extractFromCSharp(
   }
 
   const rawCalls: ExtractedSymbols["rawCalls"] = [];
-  for (const node of root.findAll({ rule: { kind: "invocation_expression" } })) {
+  for (const node of safeFindAll(root, "invocation_expression")) {
     const calleeName = extractCalleeNameJs(node.text());
     if (!calleeName) continue;
     const r = node.range();
@@ -596,7 +612,7 @@ function extractFromCFamily(
 
   if (langKey === "cpp") {
     for (const k of ["class_specifier", "struct_specifier"]) {
-      for (const cls of root.findAll({ rule: { kind: k } })) {
+      for (const cls of safeFindAll(root, k)) {
         const nameNode = cls.find({ rule: { kind: "type_identifier" } });
         if (!nameNode) continue;
         const name = nameNode.text();
@@ -615,7 +631,7 @@ function extractFromCFamily(
     }
   }
 
-  for (const fn of root.findAll({ rule: { kind: "function_definition" } })) {
+  for (const fn of safeFindAll(root, "function_definition")) {
     const declarator = fn.find({ rule: { kind: "function_declarator" } });
     const nameNode = declarator?.find({ rule: { kind: "identifier" } })
       ?? declarator?.find({ rule: { kind: "qualified_identifier" } });
@@ -636,7 +652,7 @@ function extractFromCFamily(
   }
 
   const rawCalls: ExtractedSymbols["rawCalls"] = [];
-  for (const node of root.findAll({ rule: { kind: "call_expression" } })) {
+  for (const node of safeFindAll(root, "call_expression")) {
     const calleeName = extractCalleeNameJs(node.text());
     if (!calleeName) continue;
     const r = node.range();
@@ -662,7 +678,7 @@ function extractFromRuby(
   const scopes: ScopeFrame[] = [];
 
   for (const k of ["class", "module"]) {
-    for (const cls of root.findAll({ rule: { kind: k } })) {
+    for (const cls of safeFindAll(root, k)) {
       const nameNode = cls.find({ rule: { kind: "constant" } })
         ?? cls.find({ rule: { kind: "identifier" } });
       if (!nameNode) continue;
@@ -680,7 +696,7 @@ function extractFromRuby(
       scopes.push({ name, startLine, endLine, symbolId: sym.id });
     }
   }
-  for (const m of root.findAll({ rule: { kind: "method" } })) {
+  for (const m of safeFindAll(root, "method")) {
     const nameNode = m.find({ rule: { kind: "identifier" } });
     if (!nameNode) continue;
     const name = nameNode.text();
@@ -697,7 +713,7 @@ function extractFromRuby(
   }
 
   const rawCalls: ExtractedSymbols["rawCalls"] = [];
-  for (const node of root.findAll({ rule: { kind: "call" } })) {
+  for (const node of safeFindAll(root, "call")) {
     const calleeName = extractCalleeNameJs(node.text());
     if (!calleeName) continue;
     const r = node.range();
@@ -723,7 +739,7 @@ function extractFromPhp(
   const scopes: ScopeFrame[] = [];
 
   for (const k of ["class_declaration", "interface_declaration", "trait_declaration"]) {
-    for (const cls of root.findAll({ rule: { kind: k } })) {
+    for (const cls of safeFindAll(root, k)) {
       const nameNode = cls.find({ rule: { kind: "name" } });
       if (!nameNode) continue;
       const name = nameNode.text();
@@ -741,7 +757,7 @@ function extractFromPhp(
     }
   }
   for (const k of ["function_definition", "method_declaration"]) {
-    for (const m of root.findAll({ rule: { kind: k } })) {
+    for (const m of safeFindAll(root, k)) {
       const nameNode = m.find({ rule: { kind: "name" } });
       if (!nameNode) continue;
       const name = nameNode.text();
@@ -761,7 +777,7 @@ function extractFromPhp(
 
   const rawCalls: ExtractedSymbols["rawCalls"] = [];
   for (const k of ["function_call_expression", "member_call_expression", "scoped_call_expression"]) {
-    for (const node of root.findAll({ rule: { kind: k } })) {
+    for (const node of safeFindAll(root, k)) {
       const calleeName = extractCalleeNameJs(node.text());
       if (!calleeName) continue;
       const r = node.range();
@@ -788,7 +804,7 @@ function extractFromSwift(
   const scopes: ScopeFrame[] = [];
 
   for (const k of ["class_declaration", "struct_declaration", "protocol_declaration", "enum_declaration"]) {
-    for (const cls of root.findAll({ rule: { kind: k } })) {
+    for (const cls of safeFindAll(root, k)) {
       const nameNode = cls.find({ rule: { kind: "type_identifier" } })
         ?? cls.find({ rule: { kind: "identifier" } });
       if (!nameNode) continue;
@@ -808,7 +824,7 @@ function extractFromSwift(
       scopes.push({ name, startLine, endLine, symbolId: sym.id });
     }
   }
-  for (const fn of root.findAll({ rule: { kind: "function_declaration" } })) {
+  for (const fn of safeFindAll(root, "function_declaration")) {
     const nameNode = fn.find({ rule: { kind: "simple_identifier" } })
       ?? fn.find({ rule: { kind: "identifier" } });
     if (!nameNode) continue;
@@ -826,7 +842,7 @@ function extractFromSwift(
   }
 
   const rawCalls: ExtractedSymbols["rawCalls"] = [];
-  for (const node of root.findAll({ rule: { kind: "call_expression" } })) {
+  for (const node of safeFindAll(root, "call_expression")) {
     const calleeName = extractCalleeNameJs(node.text());
     if (!calleeName) continue;
     const r = node.range();
@@ -851,7 +867,7 @@ function extractFromBash(
   const symbols: SymbolNode[] = [moduleSym];
   const scopes: ScopeFrame[] = [];
 
-  for (const fn of root.findAll({ rule: { kind: "function_definition" } })) {
+  for (const fn of safeFindAll(root, "function_definition")) {
     const nameNode = fn.find({ rule: { kind: "word" } });
     if (!nameNode) continue;
     const name = nameNode.text();
@@ -868,7 +884,7 @@ function extractFromBash(
   }
 
   const rawCalls: ExtractedSymbols["rawCalls"] = [];
-  for (const node of root.findAll({ rule: { kind: "command" } })) {
+  for (const node of safeFindAll(root, "command")) {
     const nameNode = node.find({ rule: { kind: "command_name" } });
     if (!nameNode) continue;
     const name = nameNode.text();
