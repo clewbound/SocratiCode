@@ -3,6 +3,20 @@
 All notable changes to SocratiCode are documented here.
 This project uses [Conventional Commits](https://www.conventionalcommits.org/) and [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Features
+
+* **Impact Analysis & symbol-level call graph.** Four new MCP tools that go one level deeper than the file-import graph by tracking which functions call which:
+  * `codebase_impact` — return the **blast radius** for a file or symbol (every file that transitively calls into it). Use BEFORE refactoring, renaming, or deleting code.
+  * `codebase_flow` — trace forward execution flow from an entry point. With no args, returns auto-detected entry points (orphan files, conventional names like `main()`, framework routes like `app.get(...)`, tests).
+  * `codebase_symbol` — 360° view of one symbol: definition, callers, callees with confidence levels.
+  * `codebase_symbols` — list symbols in a file or search by name across the project.
+* **Sharded Qdrant storage** for the symbol graph: 27 name shards keyed by first lowercased character, 256 reverse-call file shards keyed by SHA1 first byte. Designed to scale to 100k+ files / 1M+ symbols with bounded memory via an LRU per-file payload cache.
+* **18-language symbol & call extraction**: TypeScript / JavaScript / TSX, Python, Go, Rust, Java, Kotlin, Scala, C#, C, C++, Ruby, PHP, Swift, Bash + a regex fallback for Dart/Lua/Svelte/Vue.
+* **Symbol graph builds automatically** alongside the file-import graph during `codebase_index` and `codebase_graph_build`. `codebase_graph_status` now reports symbol graph stats (files / symbols / edges / unresolved%).
+* **Symbol graph removed** automatically when `codebase_graph_remove` is called.
+
 
 ## [1.6.1](https://github.com/giancarloerra/socraticode/compare/v1.6.0...v1.6.1) (2026-04-17)
 

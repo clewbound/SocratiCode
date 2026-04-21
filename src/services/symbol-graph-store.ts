@@ -49,7 +49,8 @@ export function allNameShardKeys(): string[] {
 
 /** Map a file path to its reverse-call shard bucket (0..SYMBOL_REVERSE_SHARDS-1). */
 export function reverseShardKey(filePath: string): number {
-  const digest = createHash("sha1").update(filePath).digest();
+  // SHA-256 used purely as a distribution function for sharding — not security-sensitive.
+  const digest = createHash("sha256").update(filePath).digest();
   return digest[0] % SYMBOL_REVERSE_SHARDS;
 }
 

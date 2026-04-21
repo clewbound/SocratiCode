@@ -197,13 +197,19 @@ src/
 │   ├── graph-aliases.ts     # Path alias resolution from tsconfig/jsconfig compilerOptions.paths
 │   ├── graph-imports.ts     # Import/require/use extraction for 18+ languages via AST
 │   ├── graph-resolution.ts  # Module specifier → file path resolution (incl. aliases, SCSS partials)
+│   ├── graph-symbols.ts     # Per-language symbol & call-site extraction (Impact Analysis)
+│   ├── graph-symbol-resolution.ts  # Three-tier cross-file call-site resolution
+│   ├── graph-entrypoints.ts # Entry-point detection (orphans + main() + framework patterns + tests)
+│   ├── graph-impact.ts      # Impact / flow / context / list analysis primitives
+│   ├── symbol-graph-store.ts  # Sharded Qdrant storage layer for the symbol graph
+│   ├── symbol-graph-cache.ts  # Per-project LRU cache with lazy shard loading
 │   ├── startup.ts           # Startup lifecycle: auto-resume, graceful shutdown coordination
 │   └── context-artifacts.ts # Context artifact loading, chunking, indexing, search
 │
 ├── tools/
 │   ├── index-tools.ts       # Handlers: codebase_index, codebase_update, codebase_remove, codebase_stop, codebase_watch
 │   ├── query-tools.ts       # Handlers: codebase_search, codebase_status
-│   ├── graph-tools.ts       # Handlers: codebase_graph_build/query/stats/circular/visualize
+│   ├── graph-tools.ts       # Handlers: codebase_graph_*, codebase_impact, codebase_flow, codebase_symbol(s)
 │   ├── context-tools.ts     # Handlers: codebase_context, codebase_context_search/index/remove
 │   └── manage-tools.ts      # Handlers: codebase_health, codebase_list_projects, codebase_about
 
@@ -798,6 +804,62 @@ Watcher settings:
 | `getGraphBuildInProgressProjects` | `() → string[]` | List all projects currently building |
 | `ensureDynamicLanguages` | `() → void` | Register dynamic ast-grep language grammars |
 | `getAstGrepLang` | `(ext) → Lang \| string \| null` | Map file extension to ast-grep language |
+
+### Symbol-level call graph (Impact Analysis)
+
+A second graph layer sits on top of the file-import graph. It tracks individual functions
+and methods and the calls between them, enabling true blast-radius queries
+(`codebase_impact`), forward execution traces (`codebase_flow`), and per-symbol context
+(`codebase_symbol`).
+
+#### Pipeline
+
+```
+buildCodeGraph (one pass per file)
+   ├── extractImports          → file-import graph
+   └── extractSymbolsAndCalls  → SymbolNode[] + raw call sites per file
+                                       │
+                                       ▼
+                       resolveCallSites (3-tier strategy)
+                          1. local symbol match
+                          2. walk caller's dependencies[]
+                          3. one extra hop (barrel re-exports)
+                                       │
+                                       ▼
+                          persistSymbolGraph (sharded)
+                          ├── 1 file payload per source file
+                          ├── 27 name shards (first lowercased char)
+                          ├── 256 reverse-call file shards (SHA1 first byte)
+                          └── 1 meta point
+                                       │
+                                       ▼
+                       SymbolGraphCache (per project, lazy)
+                       — used by getImpactRadius / getCallFlow /
+                         getSymbolContext / listSymbols
+```
+
+#### Sharded storage layout (per project)
+
+| Collection | Points | Purpose |
+|------------|--------|---------|
+| `{projectId}_symgraph_meta`  | 1                | `SymbolGraphMeta` (counts, builtAt, schemaVersion, unresolved%) |
+| `{projectId}_symgraph_file`  | 1 per source file | `SymbolGraphFilePayload` — symbols + outgoing calls + contentHash |
+| `{projectId}_symgraph_index` | 27 + 256 ≈ 283   | Sharded indices: name shards (`a`..`z` + `_`) and reverse-call shards (0..255) |
+
+All points use the dummy-vector-`[0]` pattern (Qdrant requires a vector even when not used for similarity search). Points use UUID-formatted SHA-256 IDs via `uuidFromString`. The `on_disk_payload: true` flag keeps memory usage bounded.
+
+#### Languages with first-class symbol extraction
+
+TypeScript / JavaScript / TSX, Python, Go, Rust, Java, Kotlin, Scala, C#, C, C++, Ruby, PHP, Swift, Bash. Dart, Lua, Svelte, Vue and unknown languages fall through to a regex fallback that still produces a `<module>` symbol plus best-effort function/class detection.
+
+#### Confidence levels for resolved call edges
+
+- `local` — callee is defined in the same file
+- `unique` — exactly one cross-file candidate matched
+- `multiple-candidates` — name matched in more than one dependency; all candidates kept
+- `unresolved` — no symbol found anywhere reachable; left as a name-only edge
+
+`SymbolGraphMeta.unresolvedEdgePct` exposes how much of the call graph is fuzzy — useful as a quality signal.
 
 ### graph-analysis.ts
 

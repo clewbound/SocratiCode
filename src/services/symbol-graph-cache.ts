@@ -252,6 +252,7 @@ export function symbolIdToFile(id: string): string | null {
 // ── Cache registry per project ───────────────────────────────────────────
 
 const cacheRegistry = new Map<string, SymbolGraphCache>();
+const cacheLoadPromises = new Map<string, Promise<SymbolGraphCache | null>>();
 
 /** Get or build the cache for a project (loads meta from Qdrant lazily). */
 export async function getSymbolGraphCache(
@@ -259,11 +260,24 @@ export async function getSymbolGraphCache(
 ): Promise<SymbolGraphCache | null> {
   const cached = cacheRegistry.get(projectId);
   if (cached) return cached;
-  const meta = await loadSymbolGraphMeta(projectId);
-  if (!meta) return null;
-  const cache = new SymbolGraphCache(projectId, meta);
-  cacheRegistry.set(projectId, cache);
-  return cache;
+
+  const inFlight = cacheLoadPromises.get(projectId);
+  if (inFlight) return inFlight;
+
+  const promise = (async () => {
+    const meta = await loadSymbolGraphMeta(projectId);
+    if (!meta) return null;
+    const cache = new SymbolGraphCache(projectId, meta);
+    cacheRegistry.set(projectId, cache);
+    return cache;
+  })();
+
+  cacheLoadPromises.set(projectId, promise);
+  try {
+    return await promise;
+  } finally {
+    cacheLoadPromises.delete(projectId);
+  }
 }
 
 /** Replace (or insert) the cache for a project — used after a fresh rebuild. */

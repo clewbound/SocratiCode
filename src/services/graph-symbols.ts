@@ -74,9 +74,9 @@ export function extractSymbolsAndCalls(
 
   try {
     if (
-      langKey === String(Lang.JavaScript) ||
-      langKey === String(Lang.TypeScript) ||
-      langKey === String(Lang.Tsx)
+      langKey === Lang.JavaScript ||
+      langKey === Lang.TypeScript ||
+      langKey === Lang.Tsx
     ) {
       return extractFromTsLike(source, lang as Lang, relativePath, language, moduleSymbol);
     }

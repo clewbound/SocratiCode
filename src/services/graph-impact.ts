@@ -55,6 +55,7 @@ export async function getImpactRadius(
   let frontier = new Set(seedFiles);
   for (const f of seedFiles) visited.add(f);
 
+  let truncated = false;
   for (let hop = 1; hop <= safeDepth; hop++) {
     const next = new Set<string>();
     for (const calleeFile of frontier) {
@@ -69,13 +70,27 @@ export async function getImpactRadius(
     if (next.size === 0) break;
     filesByDepth.set(hop, Array.from(next).sort());
     frontier = next;
+    // After reaching the depth limit, check if more callers exist beyond it.
+    if (hop === safeDepth) {
+      for (const calleeFile of frontier) {
+        const callers = reverseIndex.get(calleeFile);
+        if (!callers) continue;
+        for (const callerFile of callers) {
+          if (!visited.has(callerFile)) {
+            truncated = true;
+            break;
+          }
+        }
+        if (truncated) break;
+      }
+    }
   }
 
   let totalFiles = 0;
   for (const arr of filesByDepth.values()) totalFiles += arr.length;
   return {
     target, targetKind, depth: safeDepth, filesByDepth, totalFiles,
-    truncated: false,
+    truncated,
   };
 }
 

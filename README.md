@@ -308,6 +308,31 @@ User: "Show me the dependency graph"
 User: "Are there any circular dependencies?"
 → codebase_graph_circular {}
   Found 2 cycles: src/a.ts → src/b.ts → src/a.ts
+
+User: "What breaks if I rename validateUser?"
+→ codebase_impact { target: "validateUser" }
+  Blast radius for symbol: validateUser
+  Hop 1 (3 files): src/auth/login.ts, src/api/users.ts, tests/auth.test.ts
+  Hop 2 (5 files): ...
+
+User: "What does the server entry point actually do?"
+→ codebase_flow {}
+  Detected 4 entry point(s):
+    main (cmd/server.go:10) — well-known-name:main
+    healthz (src/api/routes.ts:42) — framework:get
+    ...
+→ codebase_flow { entrypoint: "main" }
+  └── main (cmd/server.go:10)
+      ├── loadConfig (cmd/server.go:15)
+      └── startServer (src/server.ts:8)
+          └── ...
+
+User: "Who calls bcryptCompare and what does it call?"
+→ codebase_symbol { name: "bcryptCompare" }
+  Symbol: bcryptCompare (function)
+  Defined: src/auth/hash.ts:42–58
+  Callers (3): ← src/auth/login.ts:12, ← src/auth/reset.ts:30 ...
+  Callees (1): → compare [unique, 1 candidate]
 ```
 
 ## Agent Instructions
@@ -356,20 +381,34 @@ before reading any files directly.
    - **When planning a refactor**, use the graph to identify all affected files before
      making changes.
 
-3. **Read files only after narrowing down via search.**
+3. **Use Impact Analysis BEFORE refactoring, renaming, or deleting code.**
+   The symbol-level call graph (`codebase_impact`, `codebase_flow`, `codebase_symbol`,
+   `codebase_symbols`) goes one step deeper than the file graph: it knows which
+   functions and methods call which.
+   - `codebase_impact` answers "what breaks if I change X?" (blast radius — every file
+     that transitively calls into the target).
+   - `codebase_flow` answers "what does this code do?" by tracing forward from an entry
+     point. Call with no `entrypoint` to discover candidate entry points (auto-detected
+     via orphans, conventional names like `main()`, framework routes, tests).
+   - `codebase_symbol` gives a 360° view of one function: definition, callers, callees.
+   - `codebase_symbols` lists symbols in a file or searches by name.
+   - Always prefer these over reading multiple files when the question is about
+     dependencies between functions, not concepts.
+
+4. **Read files only after narrowing down via search.**
    Once search results clearly point to 1–3 files, read only the relevant sections.
    Never read a file just to find out if it's relevant — search first.
 
-4. **Use `codebase_graph_circular` when debugging unexpected behavior.**
+5. **Use `codebase_graph_circular` when debugging unexpected behavior.**
    Circular dependencies cause subtle runtime issues; check for them proactively.
    Also run `codebase_graph_circular` when you notice import-related errors or unexpected
    initialization order.
 
-5. **Check `codebase_status` if search returns no results.**
+6. **Check `codebase_status` if search returns no results.**
    The project may not be indexed yet. Run `codebase_index` if needed, then wait for
    `codebase_status` to confirm completion before searching.
 
-6. **Leverage context artifacts for non-code knowledge.**
+7. **Leverage context artifacts for non-code knowledge.**
    Projects can define a `.socraticodecontextartifacts.json` config to expose database
    schemas, API specs, infrastructure configs, architecture docs, and other project
    knowledge that lives outside source code. These artifacts are auto-indexed alongside
@@ -388,7 +427,13 @@ before reading any files directly.
 | Find a specific function, constant, or type | `codebase_search` (exact name) or grep if you know already the exact string |
 | Find exact error messages, log strings, or regex patterns | grep / ripgrep |
 | See what a file imports or what depends on it | `codebase_graph_query` |
-| Check blast radius before modifying or deleting a file | `codebase_graph_query` (look at dependents) |
+| Check blast radius before modifying or deleting a file | `codebase_impact` (symbol-level) or `codebase_graph_query` (file-level) |
+| **What breaks if I change function X?** | `codebase_impact target=X` |
+| **What does this entry point actually do?** | `codebase_flow entrypoint=X` |
+| **List entry points in this codebase** | `codebase_flow` (no args) |
+| **Who calls this function and what does it call?** | `codebase_symbol name=X` |
+| **What functions/classes exist in this file?** | `codebase_symbols file=path` |
+| **Search for symbols by name across the project** | `codebase_symbols query=X` |
 | Spot architectural problems | `codebase_graph_circular`, `codebase_graph_stats` |
 | Visualise module structure | `codebase_graph_visualize` |
 | Verify index is up to date | `codebase_status` |
@@ -768,6 +813,18 @@ Once connected, 21 tools are available to your AI assistant:
 | `codebase_graph_visualize` | Generate a Mermaid diagram of the dependency graph |
 | `codebase_graph_status` | Check graph build progress or persisted graph metadata |
 | `codebase_graph_remove` | Remove a project's persisted code graph (waits for in-flight graph build to finish first) |
+
+#### Impact Analysis (symbol-level call graph)
+
+A second graph layer goes one step deeper than file imports — it tracks which functions
+and methods call which. Use these tools BEFORE refactoring, renaming, or deleting code.
+
+| Tool | Description |
+|------|-------------|
+| `codebase_impact` | Blast radius — what files break if you change file/function X (BFS through reverse-call edges) |
+| `codebase_flow` | Trace forward execution flow from an entry point. Call with no args to discover entry points (orphans, `main()`, framework routes, tests) |
+| `codebase_symbol` | 360° view of one symbol — its definition, callers, and callees |
+| `codebase_symbols` | List symbols in a file or search by name across the project |
 
 #### Management
 
