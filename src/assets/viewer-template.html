@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{{TITLE}}</title>
+<style>{{STYLES}}</style>
+</head>
+<body>
+<header>
+  <h1>SocratiCode <span class="proj">{{PROJECT_NAME}}</span> <span class="stats">{{STATS}}</span></h1>
+  <div class="sep"></div>
+  <div class="toolbar view-toggle" title="Switch between file-level and symbol-level graph">
+    <button data-view="files" class="active">Files</button>
+    <button data-view="symbols">Symbols</button>
+  </div>
+  <div class="sep"></div>
+  <div class="toolbar">
+    <label for="layout">Layout</label>
+    <select id="layout">
+      <option value="dagre">Hierarchical (Dagre)</option>
+      <option value="cose">Force-directed</option>
+      <option value="concentric">Concentric</option>
+      <option value="breadthfirst">Breadth-first</option>
+      <option value="grid">Grid</option>
+      <option value="circle">Circle</option>
+    </select>
+  </div>
+  <div class="spacer"></div>
+  <div class="toolbar">
+    <input id="search" type="text" placeholder="Search files / symbols…" autocomplete="off">
+    <button id="fit" title="Fit the whole graph into view">Fit</button>
+    <button id="reset" title="Clear highlights and recenter">Reset</button>
+    <button id="export" class="primary" title="Export the current view as a PNG image">Export PNG</button>
+  </div>
+</header>
+<main>
+  <div id="cy"></div>
+  <aside id="sidebar" class="empty">Click a node to see details</aside>
+  <div id="banner"></div>
+  <div id="tooltip"></div>
+</main>
+<script>{{CYTOSCAPE}}</script>
+<script>{{DAGRE}}</script>
+<script>{{CYTOSCAPE_DAGRE}}</script>
+<script id="socraticode-data" type="application/json">{{DATA_JSON}}</script>
+<script>
+  // Parse the embedded JSON from a <script type="application/json"> — safest
+  // channel for arbitrary strings; no template interpolation into JS.
+  window.__SOCRATICODE_DATA__ = JSON.parse(document.getElementById("socraticode-data").textContent);
+</script>
+<script>{{APP}}</script>
+</body>
+</html>

@@ -861,6 +861,17 @@ TypeScript / JavaScript / TSX, Python, Go, Rust, Java, Kotlin, Scala, C#, C, C++
 
 `SymbolGraphMeta.unresolvedEdgePct` exposes how much of the call graph is fuzzy — useful as a quality signal.
 
+#### Accepted limits — what the call graph does not see
+
+The call graph is built from static analysis without type inference. These classes of call patterns are silently absent from the graph **by design**:
+
+- **Dynamic dispatch** — Python `getattr(obj, name)(...)`, JavaScript `obj[key](...)`, `eval`, language-level reflection. The callee is only known at runtime; the static extractor captures the literal call sites it can see and nothing more.
+- **Method resolution without receiver type** — `obj.foo()` resolves by the bare name `foo` against every dependency that exports a `foo`. Receiver type is informational in the output, never a pruning filter. Two unrelated classes with a `foo` method both appear as candidates on an ambiguous edge (`confidence: "multiple-candidates"`).
+- **Macros** — Rust (`println!`, custom `macro_rules!`) and C / C++ preprocessor macros are not expanded. Macro invocations are captured as calls to the macro *name*, not to whatever the expansion actually calls.
+- **Framework magic** — Dependency injection (Spring `@Autowired`, Angular DI, NestJS providers), ORM metaprogramming (Rails `has_many`, ActiveRecord callbacks), decorator-driven routing where the handler is never named at a call site (Django class-based view dispatch, some FastAPI patterns), and similar indirection goes through the framework rather than through a direct call. A method that is only called via `@Autowired` will show zero callers in `codebase_impact`.
+
+`SymbolGraphMeta.unresolvedEdgePct` is the quality signal for this class of limit: consistently high values (>20%) indicate either heavy framework magic in the codebase or a language where extractor coverage is incomplete. Users running `codebase_impact` on a service-oriented codebase with heavy DI should treat "zero callers" as a hint to double-check, not a guarantee.
+
 #### Per-file incremental updates (Phase F)
 
 `services/symbol-graph-incremental.ts` exports `updateChangedFilesSymbolGraph(projectId, projectPath, fileGraph, changedRelPaths, removedRelPaths)`. Given a freshly-rebuilt file-import graph and a small list of changed/removed paths, it:
@@ -1052,7 +1063,7 @@ Parameters:
   projectPath?: string        — Absolute path (defaults to cwd)
   extraExtensions?: string    — Comma-separated extra extensions
 
-Behavior: Starts graph build in the background (fire-and-forget).
+Behaviour: Starts graph build in the background (fire-and-forget).
   If a build is already in progress, returns current progress instead.
   Uses concurrency guard — duplicate callers share the same build.
 
@@ -1087,10 +1098,45 @@ Returns: List of circular dependency chains (up to 20 displayed)
 #### `codebase_graph_visualize`
 ```
 Parameters:
-  projectPath?: string  — Absolute path (defaults to cwd)
+  projectPath?: string       — Absolute path (defaults to cwd)
+  mode?: "mermaid" | "interactive" — Output mode (default "mermaid")
+  open?: boolean             — In interactive mode, auto-open the browser (default true)
 
-Returns: Mermaid diagram of the dependency graph, color-coded by language
+Returns:
+  - mode=mermaid     → Mermaid diagram (text), colour-coded by language
+  - mode=interactive → Self-contained HTML file path + auto-opened browser window
 ```
+
+The interactive mode generates a full-featured graph explorer backed by
+vendored Cytoscape.js + Dagre assets — no CDN, works offline. Architecture:
+
+  1. `services/graph-visualize-html.ts::buildInteractiveGraphHtml()` loads
+     the assets once (module-level cache), builds `VizData` from the file
+     graph plus — when a `SymbolGraphMeta` exists and the totals fit under
+     the caps (`MAX_SYMBOLS=20000`, `MAX_EDGES=60000`) — the symbol graph
+     via parallel `loadFilePayload()` batches. Per-file symbol lists are
+     embedded unconditionally (capped at `MAX_SYMS_PER_FILE=200` per file).
+  2. Assets are spliced into `viewer-template.html` (CSS, Cytoscape,
+     Dagre, cytoscape-dagre plugin, `viewer-app.js`, and graph data as
+     JSON inside `<script type="application/json">`). Every `<` in the
+     JSON is escaped to `\u003c` so a stray `</script>` in a symbol name
+     cannot break out.
+  3. `services/graph-visualize-browser.ts::writeInteractiveGraphFile()`
+     writes to `os.tmpdir()/socraticode-graph/${projectId}.html` —
+     deterministic path per project, overwritten on each call.
+  4. `openInBrowser()` uses the `open` npm package (no new transitive
+     deps; wraps `open` on macOS, `xdg-open` on Linux, `start` on
+     Windows). Failure is soft — the tool output still includes the file
+     path so the user can open it manually.
+  5. The viewer (`viewer-app.js`) uses `document.createElement` +
+     `textContent` exclusively (no `innerHTML`) so data fields with
+     HTML-looking content are neutral.
+
+When the symbol graph overflows the caps, the HTML still renders the
+file view; the Symbols toggle is shown but explicitly disabled with a
+banner directing the user to `codebase_impact` / `codebase_symbols` for
+symbol-level queries. Per-file symbol lists in the sidebar remain
+available regardless of total graph size.
 
 #### `codebase_graph_remove`
 ```
@@ -1379,7 +1425,7 @@ Make sure the project has been indexed first (`codebase_index`). Check the statu
 
 ### Code graph returns empty
 
-The code graph uses ast-grep for AST-based import extraction. It works for 18+ languages. If a file has no recognized imports (or uses non-standard import patterns), it may appear as an orphan node.
+The code graph uses ast-grep for AST-based import extraction. It works for 18+ languages. If a file has no recognised imports (or uses non-standard import patterns), it may appear as an orphan node.
 
 ### Large codebase is slow to index
 

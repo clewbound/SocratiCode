@@ -13,6 +13,8 @@ import {
   listSymbols,
   looksLikeFilePath,
 } from "../services/graph-impact.js";
+import { openInBrowser, writeInteractiveGraphFile } from "../services/graph-visualize-browser.js";
+import { buildInteractiveGraphHtml } from "../services/graph-visualize-html.js";
 import { logger } from "../services/logger.js";
 import { getSymbolGraphCache } from "../services/symbol-graph-cache.js";
 import { ensureWatcherStarted } from "../services/watcher.js";
@@ -169,6 +171,43 @@ export async function handleGraphTool(
 
       if (graph.nodes.length === 0) {
         return "No graph data available. Run codebase_graph_build first.";
+      }
+
+      const rawMode = String(args.mode ?? "mermaid").toLowerCase();
+      if (rawMode !== "mermaid" && rawMode !== "interactive") {
+        return `Invalid mode "${rawMode}". Must be "mermaid" (default — returns Mermaid text) or "interactive" (generates a self-contained HTML page and opens it in the browser).`;
+      }
+
+      if (rawMode === "interactive") {
+        const projectId = projectIdFromPath(projectPath);
+        const projectName = path.basename(projectPath);
+        const { html, stats } = await buildInteractiveGraphHtml({ projectPath, projectName, projectId, graph });
+        const file = await writeInteractiveGraphFile(projectId, html);
+        const noOpenRequested = args.open === false || args.open === "false";
+        const openResult = noOpenRequested ? { opened: false as const } : await openInBrowser(file);
+
+        const lines = [
+          `Interactive dependency graph for: ${projectPath}`,
+          `File written: ${file}`,
+          `Stats: ${stats.files} files · ${stats.fileEdges} edges · symbol view: ${stats.symbolMode}${stats.symbolMode === "full" ? ` (${stats.symbols} symbols / ${stats.symbolEdges} calls)` : ""}`,
+        ];
+        if (noOpenRequested) {
+          lines.push("", "Browser auto-open skipped (open=false). Open the file above manually.");
+        } else if (openResult.opened) {
+          lines.push("", "Opened in your default browser. If nothing appears, open the file path above manually.");
+        } else {
+          lines.push("", `Could not auto-open a browser (${openResult.error}). Open the file path above manually.`);
+        }
+        lines.push(
+          "",
+          "Interactions:",
+          "  • Click a node → sidebar with file/symbol details, symbols list, and action buttons.",
+          "  • Right-click a node → highlight its blast radius (reverse-transitive closure).",
+          "  • Toggle Files ↔ Symbols at the top (Symbols disabled on gigantic repos — use codebase_impact for those).",
+          "  • Search box filters nodes live; layout dropdown switches between Dagre / force / concentric / grid.",
+          "  • Export PNG button produces a shareable image of the current view.",
+        );
+        return lines.join("\n");
       }
 
       const mermaid = generateMermaidDiagram(graph);

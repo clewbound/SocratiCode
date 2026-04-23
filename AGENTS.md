@@ -42,10 +42,10 @@ before reading any files directly.
    Once search results clearly point to 1–3 files, read only the relevant sections.
    Never read a file just to find out if it's relevant — search first.
 
-5. **Use `codebase_graph_circular` when debugging unexpected behavior.**
+5. **Use `codebase_graph_circular` when debugging unexpected behaviour.**
    Circular dependencies cause subtle runtime issues; check for them proactively.
    Also run `codebase_graph_circular` when you notice import-related errors or unexpected
-   initialization order.
+   initialisation order.
 
 6. **Check `codebase_status` if search returns no results.**
    The project may not be indexed yet. Run `codebase_index` if needed, then wait for
@@ -78,7 +78,8 @@ before reading any files directly.
 | **What functions/classes exist in this file?** | `codebase_symbols file=path` |
 | **Search for symbols by name across the project** | `codebase_symbols query=X` |
 | Spot architectural problems | `codebase_graph_circular`, `codebase_graph_stats` |
-| Visualise module structure | `codebase_graph_visualize` |
+| Visualise module structure (text / Mermaid) | `codebase_graph_visualize` |
+| **User asks for a visual / interactive / shareable graph** | `codebase_graph_visualize mode="interactive"` — opens a self-contained HTML page with file + symbol views, blast-radius overlay, search, PNG export. Works offline (vendored Cytoscape). |
 | Verify index is up to date | `codebase_status` |
 | Discover what project knowledge (schemas, specs, configs) is available | `codebase_context` |
 | Find database tables, API endpoints, infra configs | `codebase_context_search` |

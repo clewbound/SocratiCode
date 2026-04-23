@@ -23,6 +23,18 @@ This project uses [Conventional Commits](https://www.conventionalcommits.org/) a
 * **Symbol graph crashed on prototype-key collisions** (e.g. a method named `constructor`, `toString`, or `hasOwnProperty`). The shard maps used `shard[name]` bracket access on a plain `{}`, which returned `Object.prototype.constructor` (a function) and threw `existing.push is not a function` during persistence. Fixed by guarding all shard reads with `Object.hasOwn` in `services/code-graph.ts` and `services/symbol-graph-incremental.ts`. Added a regression test in `tests/integration/symbol-graph-incremental.test.ts`.
 * **`tests/unit/logger.test.ts` was order-dependent on the shell environment.** `currentLevel` was frozen at module load, so `SOCRATICODE_LOG_LEVEL=debug` in the developer shell broke the "does not emit debug at info level" assertion. `services/logger.ts` now exposes `setLogLevel` / `getLogLevel`, and the test pins the level in `beforeEach` / restores in `afterEach`.
 
+### Interactive Graph Explorer
+
+* **Interactive HTML graph viewer** — `codebase_graph_visualize` now accepts a `mode` parameter. Default `"mermaid"` keeps the existing text-diagram behaviour; new `"interactive"` mode generates a self-contained HTML page (vendored Cytoscape.js + Dagre — no CDN, works offline) and opens it in the user's default browser via the `open` npm package. The page includes:
+  * **File view** (every source file as a node, imports as edges, language colour-coded, circular deps highlighted in red)
+  * **Symbol view** toggle (functions / classes / methods as nodes, call edges between them — available when the symbol graph fits under the embed caps of 20k symbols / 60k call edges; above that the file view remains and a banner directs users to `codebase_impact` for symbol-level queries)
+  * **Sidebar** with imports / dependents / per-file symbols (first 30 shown, link to `codebase_symbols` for the rest) + action buttons for blast radius and call flow
+  * **Right-click** a node → highlight its blast radius (reverse-transitive closure)
+  * Live search, six Cytoscape layouts (Dagre / force / concentric / breadth-first / grid / circle), PNG export, hover tooltips
+  * `open: false` parameter skips auto-launch — just returns the file path (useful in headless environments)
+* **`open` added as a runtime dependency** for cross-platform browser launching (macOS, Linux, Windows).
+* **Vendored Cytoscape.js 3.30.2 + Dagre 0.8.5 + cytoscape-dagre 2.5.0** under `src/assets/` (copied to `dist/assets/` on build). Total ≈ 650 KB; inlined into the HTML at generation time — zero network dependency at view time.
+
 ### Performance
 
 * **Per-file incremental symbol-graph updates wired into the watcher / `codebase_update`** (Phase F). When a `SymbolGraphMeta` already exists for the project AND ≤ 50 files changed, `services/indexer.ts` now calls `rebuildGraph(path, { skipSymbolGraph: true })` plus `updateChangedFilesSymbolGraph(...)`, which patches only the affected name shards (≤ 27) and reverse-call shards (≤ 256). Above the threshold or on first index it falls back to a full rebuild. End-to-end measurement on a 1000-file synthetic repo: full rebuild **6.55 s**, single-file Phase F update **197 ms** (≈33×). See `DEVELOPER.md` § "Real-world benchmark numbers" and `tests/integration/symbol-graph-scale.test.ts`.

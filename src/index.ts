@@ -232,11 +232,23 @@ server.tool(
 
 server.tool(
   "codebase_graph_visualize",
-  "Generate a visual Mermaid diagram of the code dependency graph, color-coded by language with circular dependencies highlighted.",
+  [
+    "Visualise the code dependency graph. Two modes:",
+    "  • mode=\"mermaid\" (default) — returns a Mermaid diagram (text) colour-coded by language, circular deps highlighted. Best for inline rendering inside chat, GitHub, or editors that render Mermaid.",
+    "  • mode=\"interactive\" — writes a self-contained HTML page (vendored Cytoscape.js + Dagre, works offline) and opens it in the user's default browser. Shows the file graph and, when a symbol graph is available and fits, a Symbols toggle with the symbol-level call graph. Interactions: click node for sidebar with imports/dependents/symbols list; right-click node to highlight its blast radius (reverse-transitive closure); live search; layout switcher (Dagre / force / concentric / breadth-first / grid / circle); PNG export. Use this when the user asks for a visual/interactive view, wants to explore visually, or needs a shareable diagram.",
+  ].join("\n"),
   {
     projectPath: z
       .string()
       .describe("Absolute path to the project directory.")
+      .optional(),
+    mode: z
+      .enum(["mermaid", "interactive"])
+      .describe("\"mermaid\" (default — text diagram) or \"interactive\" (browser-based explorer).")
+      .optional(),
+    open: z
+      .boolean()
+      .describe("In interactive mode, whether to auto-open the browser. Default true. Set false to just get the file path (useful in headless environments).")
       .optional(),
   },
   async (args) => ({
