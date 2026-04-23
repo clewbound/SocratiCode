@@ -281,16 +281,20 @@ export async function buildInteractiveGraphHtml(opts: InteractiveHtmlOptions): P
     ? `${files.length} files · ${fileEdges.length} edges · ${sym.symbolCount ?? 0} symbols · ${sym.edgeCount ?? 0} calls`
     : `${files.length} files · ${fileEdges.length} edges`;
 
+  // Use function replacers for asset/data injection: string replacements
+  // would interpret `$&`, `$'`, `` $` ``, and `$$` in the replacement, which
+  // corrupts vendored bundles (cytoscape.min.js and dagre.min.js both contain
+  // a regex-escape idiom of the form `\$&`).
   const html = assets.template
     .replace(/\{\{TITLE\}\}/g, escapeHtml(`${opts.projectName} — SocratiCode graph`))
     .replace(/\{\{PROJECT_NAME\}\}/g, escapeHtml(opts.projectName))
     .replace(/\{\{STATS\}\}/g, escapeHtml(statsLine))
-    .replace("{{STYLES}}", assets.styles)
-    .replace("{{CYTOSCAPE}}", assets.cytoscape)
-    .replace("{{DAGRE}}", assets.dagre)
-    .replace("{{CYTOSCAPE_DAGRE}}", assets.cytoscapeDagre)
-    .replace("{{DATA_JSON}}", toEmbeddedJson(data))
-    .replace("{{APP}}", assets.app);
+    .replace("{{STYLES}}", () => assets.styles)
+    .replace("{{CYTOSCAPE}}", () => assets.cytoscape)
+    .replace("{{DAGRE}}", () => assets.dagre)
+    .replace("{{CYTOSCAPE_DAGRE}}", () => assets.cytoscapeDagre)
+    .replace("{{DATA_JSON}}", () => toEmbeddedJson(data))
+    .replace("{{APP}}", () => assets.app);
 
   logger.info("Built interactive graph HTML", {
     project: opts.projectName,

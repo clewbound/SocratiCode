@@ -105,6 +105,20 @@ describe("graph-visualize-html", () => {
     expect(html).toContain('"symbolMode":"capped"');
   });
 
+  it("inlines vendored Cytoscape/Dagre bundles byte-for-byte (no $-token interpretation)", async () => {
+    // Regression for a `String.prototype.replace(string, string)` pitfall: a `$&`
+    // inside the replacement is interpreted as the match, corrupting any asset
+    // (or embedded data) that contains `$&`, `$'`, `` $` ``, or `$$`.
+    const { html } = await buildInteractiveGraphHtml({
+      projectPath: "/proj", projectName: "bytes", projectId: "p1", graph: SAMPLE_GRAPH,
+    });
+    // If the bug returns, `\$&` becomes `\{{CYTOSCAPE}}` / `\{{DAGRE}}` in the output.
+    expect(html.includes("\\{{CYTOSCAPE}}")).toBe(false);
+    expect(html.includes("\\{{DAGRE}}")).toBe(false);
+    // And the original token must survive verbatim from both bundles.
+    expect(html.includes("\\$&")).toBe(true);
+  });
+
   it("marks edges that belong to a cycle as cyclic:true", async () => {
     const cyclic: CodeGraph = {
       nodes: [
