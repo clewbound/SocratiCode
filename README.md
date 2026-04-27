@@ -34,13 +34,15 @@
 >
 > 💬 Questions or just want to chat? Join us on [Discord](https://discord.gg/5DrMXfNG).
 
-**One thing, done well: deep codebase intelligence — zero setup, no bloat, fully automatic.** SocratiCode gives AI assistants deep semantic understanding of your codebase — hybrid search, cross-project search, polyglot code dependency graphs, **symbol-level Impact Analysis** (the blast radius of any file or function change — use it BEFORE refactoring), an **interactive HTML graph explorer** for visual navigation, and searchable context artifacts (database schemas, API specs, infra configs, architecture docs). Zero configuration — add it to **any MCP host**, or install the native **plugin** for Claude Code, Cursor, VS Code Copilot, Codex or Gemini CLI. It manages everything automatically.
+> **☁️ SocratiCode Cloud (private beta)** — Hosted, shared team index built on the same engine as the open-source version, plus SSO, audit logs, branch-aware indexing, and VPC / air-gapped deployment options. The open-source core remains free forever. [Request early access →](https://socraticode.cloud)
 
-**Production-ready**, battle-tested on **enterprise-level** large repositories (up to and over **~40 million lines of code**). **Batched**, automatic **resumable** indexing checkpoints progress — pauses, crashes, restarts, and interruptions don't lose work. The file watcher keeps the **index automatically updated** at every file change and across sessions. **Multi-agent ready** — multiple AI agents can work on the same codebase simultaneously, sharing a single index with automatic coordination and zero configuration.
+**One thing, done well: deep codebase intelligence — zero setup, no bloat, fully automatic.** SocratiCode gives AI assistants deep semantic understanding of your codebase — **hybrid search, cross-project search, polyglot code dependency graphs, symbol-level impact analysis and flow, interactive HTML graph explorer for visual navigation, and searchable context artifacts (database schemas, API specs, infra configs, architecture docs)**. Zero configuration — add it to **any MCP host**, or install the **Native Plugin** for Claude Code, Cursor, VS Code Copilot, Codex or Gemini CLI. It manages everything automatically.
+
+**Production-ready**, battle-tested on **enterprise-level** large repositories (up to and over **~40 million lines of code**). **Batched**, automatic **resumable** indexing checkpoints progress — pauses, crashes, restarts, and interruptions don't lose work. The file watcher keeps the **index automatically updated** at every file change and across sessions. **Multi-branch, multi-repo** and **multi-agent ready** — multiple AI agents can work on the same codebase simultaneously, sharing a single index with automatic coordination and zero configuration.
 
 **Private and local by default** — Docker handles everything, no API keys required, no data leaves your machine. **Cloud ready** for embeddings (OpenAI, Google Gemini) and Qdrant, and a **full suite of configuration options** are all available when you need them.
 
-> **☁️ SocratiCode Cloud (private beta)** — Hosted, shared team index built on the same engine as the open-source version, plus SSO, audit logs, branch-aware indexing, and VPC / air-gapped deployment options. The open-source core remains free forever. [Request early access →](https://socraticode.cloud)
+**Code intelligence that belongs to you, AI and host agnostic** — your codebase's understanding lives with the code, not locked to any one assistant, IDE or model. And because SocratiCode pre-computes the hard parts (blast radius, call-flow, dependency traversal), **smaller models can handle architectural complex tasks that would otherwise need top-tier reasoning**, saving even more on token cost.
 
 The first Qdrant‑based MCP/Claude Plugin/Skill that pairs auto‑managed, zero‑config local Docker deployment with **AST‑aware code chunking, hybrid semantic + BM25 (RRF‑fused) code search**, polyglot dependency **graphs** with circular‑dependency visualisation, **symbol‑level Impact Analysis** (blast‑radius & call‑flow tracing across 18 languages), and searchable **infra/API/database artifacts** in a single focused, zero-config and easy to use code intelligence engine.
 
@@ -166,7 +168,7 @@ SocratiCode is available as a native plugin on multiple AI coding platforms. Plu
 
 | Platform | Install method |
 |:---------|:---------------|
-| Claude Code | `claude plugin marketplace add giancarloerra/socraticode` — [full instructions](#claude-code-plugin-recommended-for-claude-code-users) |
+| Claude Code | `claude plugin marketplace add giancarloerra/socraticode && claude plugin install socraticode@socraticode` — [full instructions](#claude-code-plugin-recommended-for-claude-code-users) |
 | Cursor | `/add-plugin https://github.com/giancarloerra/socraticode` |
 | VS Code Copilot | Command Palette → `Chat: Install Plugin From Source` → `https://github.com/giancarloerra/socraticode` |
 | Zed | Add as a custom MCP server in Zed settings — [config example](#zed) |
@@ -206,6 +208,9 @@ I built SocratiCode because I regularly work on existing, large, and complex cod
 | Semantic search | — | ✅ | ✅¹ | ✅ |
 | Hybrid search (fused) | — | — | — | ✅ |
 | Code dependency graph | — | — | ✅² | ✅ |
+| Symbol-level impact / blast radius | — | — | — | ✅ |
+| Call-flow tracing (entry point → callees) | — | — | — | ✅ |
+| Interactive visual graph explorer | — | — | — | ✅ |
 | Circular dependency detection | — | — | — | ✅ |
 | Non-code knowledge (schemas, API specs) | — | — | — | ✅ |
 | Cross-project search | — | — | — | ✅ |
