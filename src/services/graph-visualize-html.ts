@@ -92,9 +92,17 @@ export interface VizData {
 }
 
 // ── Cached assets (read once per process) ─────────────────────────────
-let _assetCache: { cytoscape: string; dagre: string; cytoscapeDagre: string; styles: string; app: string; template: string } | null = null;
+interface AssetCache {
+  cytoscape: string;
+  dagre: string;
+  cytoscapeDagre: string;
+  styles: string;
+  app: string;
+  template: string;
+}
+let _assetCache: AssetCache | null = null;
 
-async function loadAssets(): Promise<NonNullable<typeof _assetCache>> {
+async function loadAssets(): Promise<AssetCache> {
   if (_assetCache) return _assetCache;
   const [cytoscape, dagre, cytoscapeDagre, styles, app, template] = await Promise.all([
     fs.readFile(path.join(ASSETS_DIR, "cytoscape.min.js"), "utf-8"),
@@ -277,9 +285,21 @@ export async function buildInteractiveGraphHtml(opts: InteractiveHtmlOptions): P
     symbolOmitReason: sym.reason,
   };
 
-  const statsLine = sym.mode === "full"
-    ? `${files.length} files · ${fileEdges.length} edges · ${sym.symbolCount ?? 0} symbols · ${sym.edgeCount ?? 0} calls`
-    : `${files.length} files · ${fileEdges.length} edges`;
+  // Use embedded counts (what's actually in this viewer) rather than the
+  // authoritative meta counts — otherwise the top bar and the sidebar's
+  // "All symbols" count can disagree. meta counts include synthetic
+  // <module> placeholders and unresolved call edges that aren't rendered.
+  let statsLine: string;
+  if (sym.mode === "full") {
+    statsLine = `${files.length} files · ${fileEdges.length} edges · ${sym.symbols.length} symbols · ${sym.symbolEdges.length} calls`;
+  } else if (sym.mode === "capped") {
+    // Can't embed — fall back to the authoritative meta counts and flag
+    // the limitation so the number isn't mistaken for "this viewer's
+    // explorable scope".
+    statsLine = `${files.length} files · ${fileEdges.length} edges · ${sym.symbolCount ?? 0} symbols (capped) · ${sym.edgeCount ?? 0} calls (capped)`;
+  } else {
+    statsLine = `${files.length} files · ${fileEdges.length} edges`;
+  }
 
   // Use function replacers for asset/data injection: string replacements
   // would interpret `$&`, `$'`, `` $` ``, and `$$` in the replacement, which

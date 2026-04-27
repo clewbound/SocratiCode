@@ -72,6 +72,34 @@ main { flex: 1; display: flex; min-height: 0; position: relative; }
 #sidebar .actions button.reset:hover { background: #e5e7eb; }
 #sidebar .actions button.truncated-note { background: transparent; border: none; color: #9ca3af; font-size: 11px; cursor: default; padding: 5px 0; }
 
+/* ── Symbol list (shown in sidebar when Symbol view has no seed) ──── */
+#sidebar.list h2 { margin-bottom: 2px; }
+#sidebar .list-count { color: #6b7280; font-size: 12px; margin-bottom: 12px; }
+#sidebar li .file-suffix { color: #94a3b8; font-size: 11px; margin-left: 6px; }
+
+/* ── Back button (sidebar, Symbol view with seed) ─────────────────── */
+.back-btn {
+  background: none; border: none; padding: 2px 0 8px;
+  color: #2563eb; font-size: 12px; font-family: inherit;
+  cursor: pointer; text-align: left; width: 100%;
+}
+.back-btn:hover { color: #1d4ed8; text-decoration: underline; }
+
+/* ── Symbol-view empty state overlay ────────────────────────────── */
+/* Constrained to the canvas area only (left of the sidebar) so the
+ * alphabetical symbol list stays visible on the right. `right: 340px`
+ * matches the sidebar width — keep in sync. */
+.empty-view {
+  position: absolute; top: 0; bottom: 0; left: 0; right: 340px;
+  background: #f8fafc;
+  display: none; align-items: center; justify-content: center;
+  z-index: 5; pointer-events: none;
+}
+.empty-view > div { max-width: 480px; text-align: center; padding: 32px; pointer-events: auto; }
+.empty-view h2 { font-size: 22px; font-weight: 600; color: #0f172a; margin-bottom: 14px; }
+.empty-view p { font-size: 14px; color: #475569; line-height: 1.6; margin-bottom: 10px; }
+.empty-view p.hint { font-size: 12px; color: #94a3b8; margin-top: 14px; padding-top: 14px; border-top: 1px solid #e2e8f0; }
+
 /* ── banner (symbol-mode not available) ─────────────────────────── */
 #banner {
   position: absolute; top: 12px; left: 50%; transform: translateX(-50%);
