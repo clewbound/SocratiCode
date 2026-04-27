@@ -60,11 +60,16 @@ export function buildJvmSuffixMap(fileSet: Set<string>): Map<string, string> {
  * introduced in C# 10) and builds:
  *
  *   key:   "App.Services"
- *   value: ["src/Services/UserService.cs", "src/Services/OrderService.cs"]
+ *   value: ["src/Services/OrderService.cs", "src/Services/UserService.cs"]
  *
  * Used to resolve `using App.Services;` to the candidate files that
  * contribute to that namespace. Without this, every C# `using` resolved
  * to `null` and C# projects produced an empty file-import graph.
+ *
+ * Files are processed in lexicographic order so the resulting candidate
+ * lists are deterministic across machines and runs. This matters because
+ * multi-file namespaces resolve to `candidates[0]` in `resolveImport`,
+ * and a stable "first" file is required for reproducible graphs.
  *
  * Cost: O(n) reads at graph-build time (negligible vs. AST parsing). Files
  * with no `namespace` declaration are silently skipped. Read failures are
@@ -80,8 +85,13 @@ export function buildCsNamespaceMap(
   // so commented lines (`// namespace X.Y`) are not matched.
   const namespaceRegex = /^namespace\s+([\w.]+)/gm;
 
-  for (const f of fileSet) {
-    if (path.extname(f).toLowerCase() !== ".cs") continue;
+  // `fileSet` reflects fs.readdir() traversal order, which POSIX does not
+  // guarantee. Sort .cs paths lexically so candidate lists are stable.
+  const csFiles = [...fileSet]
+    .filter((f) => path.extname(f).toLowerCase() === ".cs")
+    .sort();
+
+  for (const f of csFiles) {
     let source: string;
     try {
       source = readFileSync(path.join(projectPath, f), "utf-8");

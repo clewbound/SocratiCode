@@ -754,9 +754,10 @@ describe("graph-resolution", () => {
         csNamespaceMap,
       );
 
-      // Multi-file namespaces resolve to the first registered file. Multi-file
-      // fan-out is a known follow-up.
-      expect(result).toBe("Services/UserService.cs");
+      // Multi-file namespaces resolve to the first registered file. Files are
+      // visited in lexicographic order, so OrderService.cs precedes
+      // UserService.cs. Multi-file fan-out is a known follow-up.
+      expect(result).toBe("Services/OrderService.cs");
     });
 
     it("returns null for unknown namespaces even with a populated map", () => {
@@ -804,15 +805,49 @@ describe("graph-resolution", () => {
   // ── buildCsNamespaceMap ───────────────────────────────────────────────
 
   describe("buildCsNamespaceMap", () => {
-    it("indexes block-scoped namespace declarations", () => {
+    it("indexes block-scoped namespace declarations in lexicographic order", () => {
       project = createTempProject({
         "Models/User.cs": "namespace MyApp.Models { public class User {} }",
         "Models/Order.cs": "namespace MyApp.Models { public class Order {} }",
       });
 
       const map = buildCsNamespaceMap(project.fileSet, project.root);
-      const files = map.get("MyApp.Models") ?? [];
-      expect(files.sort()).toEqual(["Models/Order.cs", "Models/User.cs"]);
+      // Files are sorted lexically, so Order.cs comes before User.cs.
+      expect(map.get("MyApp.Models")).toEqual([
+        "Models/Order.cs",
+        "Models/User.cs",
+      ]);
+    });
+
+    it("returns the same candidate order regardless of fileSet insertion order", () => {
+      // Build two projects on the same physical layout but feed buildCsNamespaceMap
+      // a Set populated in two different orders, mimicking how fs.readdir() can
+      // hand back entries in arbitrary order across filesystems.
+      project = createTempProject({
+        "Services/UserService.cs":
+          "namespace MyApp.Services { public class UserService {} }",
+        "Services/OrderService.cs":
+          "namespace MyApp.Services { public class OrderService {} }",
+        "Services/AccountService.cs":
+          "namespace MyApp.Services { public class AccountService {} }",
+      });
+
+      const forward = new Set([
+        "Services/AccountService.cs",
+        "Services/OrderService.cs",
+        "Services/UserService.cs",
+      ]);
+      const reverse = new Set([
+        "Services/UserService.cs",
+        "Services/OrderService.cs",
+        "Services/AccountService.cs",
+      ]);
+
+      const a = buildCsNamespaceMap(forward, project.root);
+      const b = buildCsNamespaceMap(reverse, project.root);
+
+      expect(a.get("MyApp.Services")).toEqual(b.get("MyApp.Services"));
+      expect(a.get("MyApp.Services")?.[0]).toBe("Services/AccountService.cs");
     });
 
     it("indexes file-scoped namespace declarations (C# 10+)", () => {
