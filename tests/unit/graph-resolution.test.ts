@@ -907,6 +907,44 @@ describe("graph-resolution", () => {
       const map = buildCsNamespaceMap(project.fileSet, project.root);
       expect(map.get("MyApp.X")).toEqual(["Dup.cs"]);
     });
+
+    it("captures nested namespace declarations indented inside an outer block", () => {
+      project = createTempProject({
+        "Nested.cs":
+          "namespace Outer\n{\n    namespace Inner\n    {\n        class C {}\n    }\n}\n",
+      });
+
+      const map = buildCsNamespaceMap(project.fileSet, project.root);
+      expect(map.get("Outer")).toEqual(["Nested.cs"]);
+      expect(map.get("Inner")).toEqual(["Nested.cs"]);
+    });
+
+    it("rejects identifiers that do not start with a letter or underscore", () => {
+      project = createTempProject({
+        // Invalid C# (digit-leading), should not be captured.
+        "Bad.cs": "namespace 1Foo { class C {} }",
+        // Valid neighbour to make sure the scan still works.
+        "Good.cs": "namespace Real.NS { class C {} }",
+      });
+
+      const map = buildCsNamespaceMap(project.fileSet, project.root);
+      expect(map.has("1Foo")).toBe(false);
+      expect(map.get("Real.NS")).toEqual(["Good.cs"]);
+    });
+
+    it("requires a `;` or `{` after the namespace name to avoid false positives", () => {
+      project = createTempProject({
+        // The token `namespace MyApp.Hint` appears here but is not a real
+        // declaration (no terminator), so it must not be captured. The
+        // real declaration on the next line should be captured.
+        "Mixed.cs":
+          "// see also: namespace MyApp.Hint in legacy code\nnamespace MyApp.Real { class C {} }",
+      });
+
+      const map = buildCsNamespaceMap(project.fileSet, project.root);
+      expect(map.has("MyApp.Hint")).toBe(false);
+      expect(map.get("MyApp.Real")).toEqual(["Mixed.cs"]);
+    });
   });
 
   // ── Swift resolution ──────────────────────────────────────────────────

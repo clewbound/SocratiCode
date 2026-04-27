@@ -81,9 +81,15 @@ export function buildCsNamespaceMap(
 ): Map<string, string[]> {
   const map = new Map<string, string[]>();
   // Match both `namespace Foo.Bar { ... }` and the file-scoped C# 10+
-  // syntax `namespace Foo.Bar;`. The `^` plus `m` flag pins to line start
-  // so commented lines (`// namespace X.Y`) are not matched.
-  const namespaceRegex = /^namespace\s+([\w.]+)/gm;
+  // syntax `namespace Foo.Bar;`. The `^\s*` lets us catch nested
+  // declarations (`namespace Outer { namespace Inner { ... } }`) which
+  // are indented inside the outer block. The dotted-identifier capture
+  // requires each segment to start with a letter or underscore (matching
+  // C# identifier rules) so junk like `namespace 1Foo` is rejected. The
+  // `(?=[;{])` lookahead ensures we only match real declarations and
+  // not stray occurrences of the word `namespace`.
+  const namespaceRegex =
+    /^\s*namespace\s+([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*(?=[;{])/gm;
 
   // `fileSet` reflects fs.readdir() traversal order, which POSIX does not
   // guarantee. Sort .cs paths lexically so candidate lists are stable.
