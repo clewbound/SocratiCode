@@ -397,4 +397,49 @@ describe("ensureQdrantReady external mode", () => {
 
     fetchSpy.mockRestore();
   }, 30_000);
+
+  it("sends api-key header to /healthz when QDRANT_API_KEY is configured", async () => {
+    const docker = await loadDockerWithExternalMode({
+      QDRANT_URL: "https://cloud-qdrant.example:6333",
+      QDRANT_HOST: "cloud-qdrant.example",
+      QDRANT_API_KEY: "secret-key-xyz",
+    });
+
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue({ ok: true } as Response);
+
+    const result = await docker.ensureQdrantReady();
+    expect(result).toEqual({ started: false, pulled: false });
+
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "https://cloud-qdrant.example:6333/healthz",
+      expect.objectContaining({
+        headers: expect.objectContaining({ "api-key": "secret-key-xyz" }),
+      }),
+    );
+
+    fetchSpy.mockRestore();
+  });
+
+  it("omits api-key header when QDRANT_API_KEY is not set", async () => {
+    const docker = await loadDockerWithExternalMode({
+      QDRANT_URL: "http://local-qdrant:6333",
+      QDRANT_HOST: "local-qdrant",
+      // QDRANT_API_KEY intentionally undefined (matches local self-hosted Qdrant)
+    });
+
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue({ ok: true } as Response);
+
+    await docker.ensureQdrantReady();
+
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "http://local-qdrant:6333/healthz",
+      undefined,
+    );
+
+    fetchSpy.mockRestore();
+  });
 });

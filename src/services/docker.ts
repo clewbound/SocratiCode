@@ -7,6 +7,7 @@ import {
   OLLAMA_HOST,
   OLLAMA_IMAGE,
   OLLAMA_PORT,
+  QDRANT_API_KEY,
   QDRANT_CONTAINER_NAME,
   QDRANT_GRPC_PORT,
   QDRANT_HOST,
@@ -203,13 +204,20 @@ async function ensureExternalQdrantReady(onProgress?: InfraProgressCallback): Pr
   onProgress?.(`Checking external Qdrant at ${baseUrl}...`);
   logger.info("Checking external Qdrant", { url: baseUrl });
 
+  // Qdrant Cloud requires authentication on every endpoint, including /healthz
+  // (returns 403 without an api-key header). Locally run Qdrant typically does
+  // not, so the header is sent only when QDRANT_API_KEY is configured.
+  const init: RequestInit | undefined = QDRANT_API_KEY
+    ? { headers: { "api-key": QDRANT_API_KEY } }
+    : undefined;
+
   try {
     // 5 retries × 1 s — fast fail for misconfiguration, brief grace for transient flakiness
-    await waitForService(healthUrl, "Qdrant", 5, 1000);
+    await waitForService(healthUrl, "Qdrant", 5, 1000, init);
   } catch {
     throw new Error(
       `Cannot reach external Qdrant at ${baseUrl}.\n` +
-      "Verify that QDRANT_URL (or QDRANT_HOST/QDRANT_PORT) is correct and the server is reachable.",
+      "Verify that QDRANT_URL (or QDRANT_HOST/QDRANT_PORT) and QDRANT_API_KEY (if required) are correct and the server is reachable.",
     );
   }
 
@@ -348,12 +356,16 @@ export async function ensureOllamaContainerReady(onProgress?: InfraProgressCallb
 
 // ── Shared ────────────────────────────────────────────────────────────────
 
-/** Wait for an HTTP service to respond with 200 */
-async function waitForService(url: string, serviceName: string, retries = 30, delayMs = 1000): Promise<void> {
+/** Wait for an HTTP service to respond with 200.
+ *
+ * `init` is forwarded to fetch(), allowing callers to attach headers (e.g. an
+ * `api-key` header for Qdrant Cloud, whose /healthz endpoint requires auth).
+ */
+async function waitForService(url: string, serviceName: string, retries = 30, delayMs = 1000, init?: RequestInit): Promise<void> {
   logger.info(`Waiting for ${serviceName} to be ready`, { url });
   for (let i = 0; i < retries; i++) {
     try {
-      const resp = await fetch(url);
+      const resp = await fetch(url, init);
       if (resp.ok) {
         logger.info(`${serviceName} is ready`);
         return;
