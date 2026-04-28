@@ -201,6 +201,32 @@ async function ensureExternalQdrantReady(onProgress?: InfraProgressCallback): Pr
   const baseUrl = QDRANT_URL ? QDRANT_URL.replace(/\/$/, "") : `http://${QDRANT_HOST}:${QDRANT_PORT}`;
   const healthUrl = `${baseUrl}/healthz`;
 
+  // If an api-key is configured, refuse to send it over a non-TLS connection.
+  // Localhost loopback URLs are accepted because some users run authenticated
+  // Qdrant locally during development. The URL is parsed (rather than checked
+  // with startsWith) so that hostnames like "http://localhost.evil.com" are
+  // not mistaken for loopback. Placed before the try/catch so the specific
+  // error is not masked by the generic "Cannot reach" message below.
+  if (QDRANT_API_KEY) {
+    let parsed: URL | null = null;
+    try {
+      parsed = new URL(baseUrl);
+    } catch {
+      /* fall through: the unparseable URL will fail the reachability check */
+    }
+    const isHttps = parsed?.protocol === "https:";
+    const isLoopback = parsed
+      ? ["localhost", "127.0.0.1", "[::1]"].includes(parsed.hostname)
+      : false;
+    if (parsed && !isHttps && !isLoopback) {
+      throw new Error(
+        `QDRANT_API_KEY is set but ${baseUrl} is not HTTPS. ` +
+        "Refusing to send the API key over a non-TLS connection. " +
+        "Use https://... for remote or cloud Qdrant (a localhost URL is also accepted for local development).",
+      );
+    }
+  }
+
   onProgress?.(`Checking external Qdrant at ${baseUrl}...`);
   logger.info("Checking external Qdrant", { url: baseUrl });
 

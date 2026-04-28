@@ -426,7 +426,9 @@ describe("ensureQdrantReady external mode", () => {
     const docker = await loadDockerWithExternalMode({
       QDRANT_URL: "http://local-qdrant:6333",
       QDRANT_HOST: "local-qdrant",
-      // QDRANT_API_KEY intentionally undefined (matches local self-hosted Qdrant)
+      // Explicitly undefined so the test does not pick up a real
+      // QDRANT_API_KEY from the developer's shell environment.
+      QDRANT_API_KEY: undefined,
     });
 
     const fetchSpy = vi
@@ -438,6 +440,51 @@ describe("ensureQdrantReady external mode", () => {
     expect(fetchSpy).toHaveBeenCalledWith(
       "http://local-qdrant:6333/healthz",
       undefined,
+    );
+
+    fetchSpy.mockRestore();
+  });
+
+  it("rejects QDRANT_API_KEY over plain HTTP for non-loopback hosts", async () => {
+    const docker = await loadDockerWithExternalMode({
+      QDRANT_URL: "http://remote-qdrant.example:6333",
+      QDRANT_HOST: "remote-qdrant.example",
+      QDRANT_API_KEY: "secret-key-xyz",
+    });
+
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue({ ok: true } as Response);
+
+    await expect(docker.ensureQdrantReady()).rejects.toThrow(
+      /QDRANT_API_KEY is set but .* is not HTTPS/,
+    );
+    // The guard runs before the readiness probe, so fetch is never called.
+    expect(fetchSpy).not.toHaveBeenCalled();
+
+    fetchSpy.mockRestore();
+  });
+
+  it("allows QDRANT_API_KEY over plain HTTP when host is localhost (local dev)", async () => {
+    const docker = await loadDockerWithExternalMode({
+      QDRANT_URL: "http://localhost:6333",
+      QDRANT_HOST: "localhost",
+      QDRANT_API_KEY: "secret-key-xyz",
+    });
+
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue({ ok: true } as Response);
+
+    await expect(docker.ensureQdrantReady()).resolves.toEqual({
+      started: false,
+      pulled: false,
+    });
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "http://localhost:6333/healthz",
+      expect.objectContaining({
+        headers: expect.objectContaining({ "api-key": "secret-key-xyz" }),
+      }),
     );
 
     fetchSpy.mockRestore();
