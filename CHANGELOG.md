@@ -4,6 +4,13 @@ All notable changes to SocratiCode are documented here.
 This project uses [Conventional Commits](https://www.conventionalcommits.org/) and [Semantic Versioning](https://semver.org/).
 
 
+## [1.7.2](https://github.com/giancarloerra/socraticode/compare/v1.7.1...v1.7.2) (2026-04-28)
+
+### Bug Fixes
+
+* **docker:** include api-key header in external Qdrant readiness probe ([812fcd8](https://github.com/giancarloerra/socraticode/commit/812fcd89051d284875e029396ec8e457226c0193))
+* **docker:** require HTTPS for QDRANT_API_KEY; deflake no-key test ([7cdf21a](https://github.com/giancarloerra/socraticode/commit/7cdf21a96189ace11ecedcdab2d6e15a1e7fccb0))
+
 ## [1.7.1](https://github.com/giancarloerra/socraticode/compare/v1.7.0...v1.7.1) (2026-04-27)
 
 ### Bug Fixes
