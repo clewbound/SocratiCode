@@ -1095,7 +1095,7 @@ The rest of this section documents the variables themselves. Pass them using whi
 | `QDRANT_PORT` | `16333` | Qdrant REST API port (managed mode, or external without `QDRANT_URL`) |
 | `QDRANT_GRPC_PORT` | `16334` | Qdrant gRPC port (managed mode only) |
 | `QDRANT_HOST` | `localhost` | Qdrant hostname (alternative to `QDRANT_URL` for non-HTTPS external instances) |
-| `QDRANT_API_KEY` | *(none)* | Qdrant API key (required for Qdrant Cloud and other authenticated deployments) |
+| `QDRANT_API_KEY` | *(none)* | Qdrant API key (required for Qdrant Cloud and other authenticated deployments). When set, the URL must be `https://...` so the key is not transmitted over plain HTTP. Loopback URLs (`localhost`, `127.0.0.1`, `[::1]`) are accepted on `http://` for local development. |
 
 ### Indexing Behaviour
 
