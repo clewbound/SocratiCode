@@ -284,6 +284,14 @@ When `SOCRATICODE_BRANCH_AWARE=true`, the current git branch is detected via `gi
 
 `loadLinkedProjects()` reads `.socraticode.json` and `SOCRATICODE_LINKED_PROJECTS` env var. `resolveLinkedCollections()` maps linked paths to `{ name, label }` descriptors for `searchMultipleCollections()`. The current project is always first (highest dedup priority).
 
+#### Shared embedding cache
+
+When `SOCRATICODE_EMBEDDING_CACHE=true`, the indexer consults a shared Qdrant collection `socraticode_embedding_cache` before calling the embedding provider. Cache entries are keyed by `sha256(content) + ":" + EMBEDDING_MODEL + ":" + EMBEDDING_DIMENSIONS`, so model or dimension changes naturally produce a clean miss instead of returning incompatible vectors. The stored payload includes the originating model name as a defensive double-check on lookup.
+
+The cache is gated entirely by the env var: when off, neither reads nor writes happen, so toggling the flag fully enables or disables the feature. On a cache hit, the chunked file's vectors flow through the embed phase as `cachedVectors` and short-circuit the Ollama/OpenAI/Google call. On a cache miss, the freshly-computed vectors are written back per file after the Qdrant upsert succeeds. Reads and writes are best-effort — any error against the cache collection is logged and swallowed so a Qdrant blip on the cache cannot break primary indexing.
+
+The cache is shared across all projects on the same Qdrant instance; embeddings are pure functions of `(content, model)`, so cross-project reuse is correct rather than a leak. See `src/services/embedding-cache.ts`.
+
 ### Supported File Extensions (54)
 
 | Category | Extensions |
