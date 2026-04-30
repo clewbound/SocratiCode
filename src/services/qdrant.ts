@@ -579,7 +579,11 @@ export function resetEmbeddingCacheCollectionCache(): void {
 
 /** Ensure the embedding cache collection exists (idempotent, cached after first success).
  *  The collection stores (chunks, vectors) keyed by content hash + model + dimensions
- *  and is never searched, so it uses a 1-dim dummy vector (Qdrant requires vectors). */
+ *  and is never searched, so it uses a 1-dim dummy vector (Qdrant requires vectors).
+ *  Handles concurrent creation: the indexer's per-file scan calls this in parallel
+ *  via Promise.all, so multiple callers can race past the existence check. We swallow
+ *  the resulting "Conflict" / "already exists" error since either outcome leaves the
+ *  collection in the same usable state. */
 export async function ensureEmbeddingCacheCollection(): Promise<void> {
   if (embeddingCacheCollectionReady) return;
 
@@ -587,11 +591,17 @@ export async function ensureEmbeddingCacheCollection(): Promise<void> {
   const collections = await qdrant.getCollections();
   const exists = collections.collections.some((c) => c.name === EMBEDDING_CACHE_COLLECTION);
   if (!exists) {
-    await qdrant.createCollection(EMBEDDING_CACHE_COLLECTION, {
-      vectors: { size: 1, distance: "Cosine" },
-      on_disk_payload: true,
-    });
-    logger.info("Created embedding cache collection");
+    try {
+      await qdrant.createCollection(EMBEDDING_CACHE_COLLECTION, {
+        vectors: { size: 1, distance: "Cosine" },
+        on_disk_payload: true,
+      });
+      logger.info("Created embedding cache collection");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!/already exists|conflict/i.test(msg)) throw err;
+      // Another concurrent caller created it — that's fine.
+    }
   }
 
   embeddingCacheCollectionReady = true;
