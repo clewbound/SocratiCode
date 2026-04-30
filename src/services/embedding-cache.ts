@@ -40,28 +40,68 @@ function pointId(key: string): string {
 // the entry is absent, when the stored model doesn't match the current
 // EMBEDDING_MODEL env (defensive: cacheKey already isolates by model, but we
 // double-check the payload), or on any error. Best-effort: never throws.
+//
+// Thin wrapper over lookupEmbeddings — the bulk variant is the preferred
+// path for the indexer batch loop because it collapses N retrieve round-trips
+// into one. Single-key callers stay supported for ad-hoc lookups.
 export async function lookupEmbedding(contentHash: string): Promise<CachedEmbedding | null> {
+  const map = await lookupEmbeddings([contentHash]);
+  return map.get(contentHash) ?? null;
+}
+
+// Bulk variant: look up many content hashes in a single Qdrant retrieve.
+// Returns a map keyed by contentHash; misses (absent points, model mismatch,
+// errors) are simply absent from the map. Callers should treat absence as a
+// cache miss and fall through to fresh chunking + embedding.
+//
+// Best-effort like the single-key form: any Qdrant error is logged and
+// swallowed, returning whatever entries were successfully assembled (likely
+// empty on a failed retrieve).
+export async function lookupEmbeddings(
+  contentHashes: string[],
+): Promise<Map<string, CachedEmbedding>> {
+  const result = new Map<string, CachedEmbedding>();
+  if (contentHashes.length === 0) return result;
+
   try {
     await ensureEmbeddingCacheCollection();
     const client = getClient();
-    const id = pointId(cacheKey(contentHash));
+
+    // Dedupe by point id before sending the retrieve. Multiple files with
+    // identical content collapse to the same id; we only need to ask Qdrant
+    // once per unique id and then fan results back out via the hash map.
+    const idToHash = new Map<string, string>();
+    const ids: string[] = [];
+    for (const hash of contentHashes) {
+      const id = pointId(cacheKey(hash));
+      if (!idToHash.has(id)) {
+        idToHash.set(id, hash);
+        ids.push(id);
+      }
+    }
+
     const points = await client.retrieve(EMBEDDING_CACHE_COLLECTION, {
-      ids: [id],
+      ids,
       with_payload: true,
     });
-    if (points.length === 0) return null;
-    const payload = points[0].payload as unknown as StoredPayload | undefined;
-    if (!payload) return null;
+
     const expectedModel = process.env.EMBEDDING_MODEL;
-    if (expectedModel && payload.model !== expectedModel) return null;
-    return { chunks: payload.chunks, vectors: payload.vectors };
+    for (const point of points) {
+      const hash = idToHash.get(String(point.id));
+      if (!hash) continue;
+      const payload = point.payload as unknown as StoredPayload | undefined;
+      if (!payload) continue;
+      if (expectedModel && payload.model !== expectedModel) continue;
+      result.set(hash, { chunks: payload.chunks, vectors: payload.vectors });
+    }
   } catch (err) {
-    logger.warn("embedding cache lookup failed (treating as miss)", {
-      contentHash,
+    logger.warn("embedding cache batch lookup failed (treating as full miss)", {
+      count: contentHashes.length,
       error: err instanceof Error ? err.message : String(err),
     });
-    return null;
   }
+
+  return result;
 }
 
 // Store chunks+vectors keyed by content hash. Best-effort: any failure is

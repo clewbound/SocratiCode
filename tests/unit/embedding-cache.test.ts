@@ -1,8 +1,17 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 Giancarlo Erra - Altaire Limited
 
+import { createHash } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { FileChunk } from "../../src/types.js";
+
+// Mirror the point id the production code derives so mocks return the same
+// id that Qdrant would have echoed back from a real retrieve.
+function buildPointId(hash: string, model = "qwen3-embedding:0.6b", dims = "1024"): string {
+  const key = `${hash}:${model}:${dims}`;
+  const hex = createHash("sha256").update(key).digest("hex").slice(0, 32);
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
+}
 
 const { mockUpsert, mockRetrieve, mockEnsure } = vi.hoisted(() => ({
   mockUpsert: vi.fn(),
@@ -19,6 +28,7 @@ import {
   cacheKey,
   EMBEDDING_CACHE_COLLECTION,
   lookupEmbedding,
+  lookupEmbeddings,
   putEmbedding,
 } from "../../src/services/embedding-cache.js";
 
@@ -91,6 +101,7 @@ describe("lookupEmbedding", () => {
   it("returns chunks+vectors when cached", async () => {
     mockRetrieve.mockResolvedValue([
       {
+        id: buildPointId("hash-with-data"),
         payload: {
           chunks: sampleChunks,
           vectors: sampleVectors,
@@ -135,6 +146,80 @@ describe("lookupEmbedding", () => {
   it("returns null and swallows errors if ensure throws", async () => {
     mockEnsure.mockRejectedValue(new Error("collection create failed"));
     expect(await lookupEmbedding("any-hash")).toBeNull();
+  });
+});
+
+describe("lookupEmbeddings (bulk)", () => {
+  it("returns an empty map and skips qdrant when given no hashes", async () => {
+    const result = await lookupEmbeddings([]);
+    expect(result.size).toBe(0);
+    expect(mockEnsure).not.toHaveBeenCalled();
+    expect(mockRetrieve).not.toHaveBeenCalled();
+  });
+
+  it("issues a single retrieve for many hashes", async () => {
+    mockRetrieve.mockResolvedValue([]);
+    await lookupEmbeddings(["h1", "h2", "h3"]);
+    expect(mockRetrieve).toHaveBeenCalledTimes(1);
+    const [collection, body] = mockRetrieve.mock.calls[0];
+    expect(collection).toBe(EMBEDDING_CACHE_COLLECTION);
+    expect(body.ids).toHaveLength(3);
+    expect(body.with_payload).toBe(true);
+  });
+
+  it("dedupes ids when input contains duplicate hashes", async () => {
+    mockRetrieve.mockResolvedValue([]);
+    await lookupEmbeddings(["dup", "dup", "other"]);
+    const sentIds: string[] = mockRetrieve.mock.calls[0][1].ids;
+    expect(sentIds).toHaveLength(2);
+    expect(new Set(sentIds).size).toBe(sentIds.length);
+  });
+
+  it("returns a map keyed by content hash with hits resolved", async () => {
+    mockRetrieve.mockResolvedValue([
+      {
+        id: buildPointId("alpha"),
+        payload: {
+          chunks: sampleChunks,
+          vectors: sampleVectors,
+          model: "qwen3-embedding:0.6b",
+          dimensions: 1024,
+          storedAt: "2026-04-30T00:00:00.000Z",
+        },
+      },
+    ]);
+    const result = await lookupEmbeddings(["alpha", "beta"]);
+    expect(result.size).toBe(1);
+    expect(result.get("alpha")).toEqual({ chunks: sampleChunks, vectors: sampleVectors });
+    expect(result.has("beta")).toBe(false);
+  });
+
+  it("filters out points whose stored model differs (defensive)", async () => {
+    mockRetrieve.mockResolvedValue([
+      {
+        id: buildPointId("good"),
+        payload: { chunks: sampleChunks, vectors: sampleVectors, model: "qwen3-embedding:0.6b", dimensions: 1024, storedAt: "" },
+      },
+      {
+        id: buildPointId("stale"),
+        payload: { chunks: sampleChunks, vectors: sampleVectors, model: "old-model", dimensions: 1024, storedAt: "" },
+      },
+    ]);
+    const result = await lookupEmbeddings(["good", "stale"]);
+    expect(result.has("good")).toBe(true);
+    expect(result.has("stale")).toBe(false);
+  });
+
+  it("returns an empty map and swallows errors when qdrant retrieve throws", async () => {
+    mockRetrieve.mockRejectedValue(new Error("qdrant down"));
+    const result = await lookupEmbeddings(["h1", "h2"]);
+    expect(result.size).toBe(0);
+  });
+
+  it("returns an empty map when ensure throws (best-effort)", async () => {
+    mockEnsure.mockRejectedValue(new Error("ensure failed"));
+    const result = await lookupEmbeddings(["h1"]);
+    expect(result.size).toBe(0);
   });
 });
 

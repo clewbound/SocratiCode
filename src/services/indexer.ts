@@ -21,7 +21,7 @@ import {
 import type { FileChunk } from "../types.js";
 import { ensureDynamicLanguages, getAstGrepLang, rebuildGraph, removeGraph } from "./code-graph.js";
 import { ensureArtifactsIndexed, loadConfig, removeAllArtifacts } from "./context-artifacts.js";
-import { lookupEmbedding, putEmbedding } from "./embedding-cache.js";
+import { type CachedEmbedding, lookupEmbeddings, putEmbedding } from "./embedding-cache.js";
 import { generateEmbeddings, prepareDocumentText } from "./embeddings.js";
 import { createIgnoreFilter, shouldIgnore } from "./ignore.js";
 import { acquireProjectLock, releaseProjectLock } from "./lock.js";
@@ -736,10 +736,24 @@ export async function indexProject(
   let skippedCount = 0;
   let cacheHits = 0;
 
+  // Per-file scan candidate: a file that survived stat+read+skip-by-hash and
+  // is ready for cache lookup or fresh chunking. `null` means the file was
+  // skipped (oversized, unchanged, or read error) and should not be processed
+  // further in this batch.
+  type ScanCandidate = {
+    relativePath: string;
+    absolutePath: string;
+    content: string;
+    contentHash: string;
+  };
+
   for (let i = 0; i < files.length; i += FILE_SCAN_BATCH) {
     const batch = files.slice(i, i + FILE_SCAN_BATCH);
-    const results = await Promise.all(
-      batch.map(async (relativePath): Promise<ChunkedFile | null> => {
+
+    // Phase 1: parallel stat + read + hash. Skip oversized, unchanged, and
+    // read-error files here so they never reach the bulk cache lookup.
+    const scanned: Array<ScanCandidate | null> = await Promise.all(
+      batch.map(async (relativePath): Promise<ScanCandidate | null> => {
         const absolutePath = path.join(resolvedPath, relativePath);
         try {
           const stat = await fsp.stat(absolutePath);
@@ -755,39 +769,48 @@ export async function indexProject(
             return null;
           }
 
-          // Try the shared embedding cache before chunking + embedding from
-          // scratch. On a hit we reuse the cached chunks (so chunk IDs and
-          // line ranges stay stable) and the cached vectors flow through to
-          // the embed phase, which short-circuits the Ollama call.
-          if (cacheEnabled) {
-            const cached = await lookupEmbedding(contentHash);
-            if (cached) {
-              return {
-                relativePath,
-                absolutePath,
-                contentHash,
-                chunks: cached.chunks,
-                cachedVectors: cached.vectors,
-              };
-            }
-          }
-
-          const chunks = chunkFileContent(absolutePath, relativePath, content);
-          return { relativePath, absolutePath, contentHash, chunks, cachedVectors: null };
+          return { relativePath, absolutePath, content, contentHash };
         } catch {
           return null;
         }
       }),
     );
 
-    for (const r of results) {
-      if (r) {
-        chunkedFiles.push(r);
-        if (r.cachedVectors !== null) cacheHits++;
-      } else {
-        skippedCount++;
-      }
+    const candidates: ScanCandidate[] = [];
+    for (const s of scanned) {
+      if (s) candidates.push(s);
+      else skippedCount++;
     }
+
+    // Phase 2: one bulk cache lookup for the whole batch. This collapses what
+    // used to be FILE_SCAN_BATCH separate Qdrant retrieve round-trips into a
+    // single retrieve call per outer batch.
+    let cachedByHash: Map<string, CachedEmbedding> = new Map();
+    if (cacheEnabled && candidates.length > 0) {
+      cachedByHash = await lookupEmbeddings(candidates.map((c) => c.contentHash));
+    }
+
+    // Phase 3: assemble ChunkedFile entries. On a cache hit, reuse cached
+    // chunks + vectors so chunk IDs and line ranges stay stable across
+    // collections. On a miss, fall through to fresh chunking; the embed phase
+    // will handle the Ollama call.
+    for (const { relativePath, absolutePath, content, contentHash } of candidates) {
+      const cached = cachedByHash.get(contentHash);
+      if (cached) {
+        chunkedFiles.push({
+          relativePath,
+          absolutePath,
+          contentHash,
+          chunks: cached.chunks,
+          cachedVectors: cached.vectors,
+        });
+        cacheHits++;
+        continue;
+      }
+      const chunks = chunkFileContent(absolutePath, relativePath, content);
+      chunkedFiles.push({ relativePath, absolutePath, contentHash, chunks, cachedVectors: null });
+    }
+
     progress.filesProcessed = Math.min(i + batch.length, files.length);
   }
 
