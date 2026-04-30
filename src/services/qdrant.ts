@@ -565,6 +565,38 @@ async function ensureMetadataCollection(): Promise<void> {
   metadataCollectionReady = true;
 }
 
+// ── Embedding cache collection ───────────────────────────────────────────
+
+const EMBEDDING_CACHE_COLLECTION = "socraticode_embedding_cache";
+
+/** Cached flag: once the embedding cache collection is confirmed to exist, skip re-checking */
+let embeddingCacheCollectionReady = false;
+
+/** Reset the embedding cache collection readiness cache (for testing only) */
+export function resetEmbeddingCacheCollectionCache(): void {
+  embeddingCacheCollectionReady = false;
+}
+
+/** Ensure the embedding cache collection exists (idempotent, cached after first success).
+ *  The collection stores (chunks, vectors) keyed by content hash + model + dimensions
+ *  and is never searched, so it uses a 1-dim dummy vector (Qdrant requires vectors). */
+export async function ensureEmbeddingCacheCollection(): Promise<void> {
+  if (embeddingCacheCollectionReady) return;
+
+  const qdrant = getClient();
+  const collections = await qdrant.getCollections();
+  const exists = collections.collections.some((c) => c.name === EMBEDDING_CACHE_COLLECTION);
+  if (!exists) {
+    await qdrant.createCollection(EMBEDDING_CACHE_COLLECTION, {
+      vectors: { size: 1, distance: "Cosine" },
+      on_disk_payload: true,
+    });
+    logger.info("Created embedding cache collection");
+  }
+
+  embeddingCacheCollectionReady = true;
+}
+
 /** Generate a stable UUID from a collection name (for Qdrant point ID).
  *  Uses SHA-256 to avoid collision risk inherent in simpler hashes (e.g. djb2). */
 function metadataPointId(collName: string): string {
