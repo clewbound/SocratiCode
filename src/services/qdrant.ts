@@ -331,10 +331,20 @@ const CLONE_CONVERGENCE_POLL_MS = 200;
  *  no per-point JSON serialization, no BM25 re-tokenization. ~14× faster
  *  than scroll+upsert on the prod-equivalent 125k-point workload.
  *
+ *  Concurrency assumption: source is treated as quiescent during clone.
+ *  Writes to source between `getCollection` (line below) and `createSnapshot`
+ *  may shift `expectedCount` upward — convergence uses `>=` so that's safe;
+ *  rolled-back writes could over-extend the wait. In practice each branch
+ *  collection is owned by one indexProject run at a time, so concurrent
+ *  writes shouldn't happen.
+ *
  *  Failure semantics:
- *    - createSnapshot or recoverSnapshot errors are propagated. Callers
- *      should catch and treat as "fast path unavailable", optionally
- *      cleaning up any partial target before falling through.
+ *    - createSnapshot errors are propagated; no cleanup needed (no target
+ *      was created).
+ *    - recoverSnapshot or convergence-deadline errors are propagated, but
+ *      target collection has already been auto-created by recover and may
+ *      be in a partial state. Callers MUST drop the partial target before
+ *      falling through to a re-index path.
  *    - The source-side snapshot is deleted best-effort in `finally`; a
  *      cleanup failure is logged but does not fail the clone. */
 export async function cloneCollectionPoints(source: string, target: string): Promise<number> {
