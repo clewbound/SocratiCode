@@ -63,3 +63,33 @@ export async function getGitBlobShas(
     return null;
   }
 }
+
+export interface GitTreeDiff {
+  unchanged: string[];
+  modified: string[];
+  added: string[];
+  deleted: string[];
+}
+
+// Diff two git-blob-sha maps. Output arrays are deterministic (insertion order
+// from the input Maps), so callers can rely on stable iteration. Cost is O(|prev| + |curr|).
+export function diffGitTrees(
+  prev: Map<string, string>,
+  curr: Map<string, string>,
+): GitTreeDiff {
+  const unchanged: string[] = [];
+  const modified: string[] = [];
+  const added: string[] = [];
+  const deleted: string[] = [];
+
+  for (const [path, sha] of curr) {
+    const prevSha = prev.get(path);
+    if (prevSha === undefined) added.push(path);
+    else if (prevSha === sha) unchanged.push(path);
+    else modified.push(path);
+  }
+  for (const path of prev.keys()) {
+    if (!curr.has(path)) deleted.push(path);
+  }
+  return { unchanged, modified, added, deleted };
+}

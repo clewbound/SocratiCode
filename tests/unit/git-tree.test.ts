@@ -6,7 +6,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { getGitBlobShas } from "../../src/services/git-tree.js";
+import { diffGitTrees, getGitBlobShas } from "../../src/services/git-tree.js";
 
 let tmp: string;
 
@@ -68,5 +68,44 @@ describe("getGitBlobShas", () => {
     if (map == null) throw new Error("expected non-null result");
     expect(map.has("with space.ts")).toBe(true);
     expect(map.has("café.ts")).toBe(true);
+  });
+});
+
+describe("diffGitTrees", () => {
+  it("classifies paths into unchanged/modified/added/deleted", () => {
+    const prev = new Map([
+      ["unchanged.ts", "aaa"],
+      ["modified.ts", "bbb"],
+      ["deleted.ts", "ccc"],
+    ]);
+    const curr = new Map([
+      ["unchanged.ts", "aaa"],
+      ["modified.ts", "bbb-new"],
+      ["added.ts", "ddd"],
+    ]);
+    const diff = diffGitTrees(prev, curr);
+    expect([...diff.unchanged].sort()).toEqual(["unchanged.ts"]);
+    expect([...diff.modified].sort()).toEqual(["modified.ts"]);
+    expect([...diff.added].sort()).toEqual(["added.ts"]);
+    expect([...diff.deleted].sort()).toEqual(["deleted.ts"]);
+  });
+
+  it("returns all unchanged when maps are identical", () => {
+    const m = new Map([
+      ["a.ts", "111"],
+      ["b.ts", "222"],
+    ]);
+    const diff = diffGitTrees(m, new Map(m));
+    expect(diff.unchanged.length).toBe(2);
+    expect(diff.modified.length).toBe(0);
+    expect(diff.added.length).toBe(0);
+    expect(diff.deleted.length).toBe(0);
+  });
+
+  it("treats empty prev as everything added", () => {
+    const curr = new Map([["a.ts", "111"]]);
+    const diff = diffGitTrees(new Map(), curr);
+    expect(diff.added).toEqual(["a.ts"]);
+    expect(diff.unchanged.length).toBe(0);
   });
 });
