@@ -19,6 +19,18 @@ const execFileAsync = promisify(execFile);
 // We only consume tracked files at stage 0 (no merge conflicts). Files in
 // other stages are skipped — if there's an active merge conflict the fast
 // paths shouldn't kick in anyway.
+//
+// SHA-1 only: this validator rejects entries whose blob hash isn't 40 hex
+// chars. Repos with `extensions.objectFormat = sha256` (64-hex blobs) will
+// produce an empty map → the fast path silently disables. Acceptable while
+// SHA-256 git repos are vanishingly rare; revisit if anyone reports a
+// no-op fast path on a SHA-256 repo.
+//
+// maxBuffer: 256 MiB is far above any realistic monorepo's `ls-files -s -z`
+// output. If exceeded, execFile rejects and we return null (silent
+// fast-path disable, debug-logged). For pathologically large indexes
+// (hundreds of thousands of files), switch to streaming via spawn. TODO:
+// streaming variant once a real repo trips the cap.
 export async function getGitBlobShas(
   projectPath: string,
 ): Promise<Map<string, string> | null> {
