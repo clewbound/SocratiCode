@@ -280,11 +280,13 @@ describe.skipIf(!dockerAvailable)("qdrant service", () => {
           await ensureCollection(source);
           await ensureCollection(target);
 
-          // Seed source with 250 points (forces multiple scroll batches).
+          // Seed 300 points (> CLONE_SCROLL_BATCH=256) so the scroll loop
+          // actually iterates twice — exercises the next_page_offset
+          // continuation path, not just the single-page early-exit.
           // Vector values are arbitrary — we just need them to be the
           // configured dimensionality so the collection accepts them.
           const denseVector = Array.from({ length: dims }, () => 0.1);
-          const points = Array.from({ length: 250 }, (_, i) => ({
+          const points = Array.from({ length: 300 }, (_, i) => ({
             id: `00000000-0000-0000-0000-${String(i).padStart(12, "0")}`,
             vector: denseVector,
             bm25Text: `point ${i}`,
@@ -293,12 +295,12 @@ describe.skipIf(!dockerAvailable)("qdrant service", () => {
           await upsertPreEmbeddedChunks(source, points);
 
           const cloned = await cloneCollectionPoints(source, target);
-          expect(cloned).toBe(250);
+          expect(cloned).toBe(300);
 
           const targetInfo = await getCollectionInfo(target);
           expect(targetInfo).not.toBeNull();
           if (targetInfo == null) throw new Error("targetInfo was null");
-          expect(targetInfo.pointsCount).toBe(250);
+          expect(targetInfo.pointsCount).toBe(300);
         } finally {
           await deleteCollection(source).catch(() => {});
           await deleteCollection(target).catch(() => {});
