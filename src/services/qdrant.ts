@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 Giancarlo Erra - Altaire Limited
 import { createHash } from "node:crypto";
-import { QdrantClient } from "@qdrant/js-client-rest";
+import { QdrantClient, type Schemas } from "@qdrant/js-client-rest";
 import { QDRANT_API_KEY, QDRANT_HOST, QDRANT_PORT, QDRANT_URL, resolveQdrantPort } from "../constants.js";
 import type { ArtifactIndexState, CodeGraph, FileChunk, SearchResult } from "../types.js";
 import { getEmbeddingConfig } from "./embedding-config.js";
@@ -284,6 +284,60 @@ export async function upsertPreEmbeddedChunks(
   }
 
   return { pointsSkipped: totalSkipped };
+}
+
+/** Scroll batch size for cloneCollectionPoints. Larger than the indexer's
+ *  per-file upsert batch (100) because cloning is a network-bound bulk read +
+ *  bulk write — we want fewer round trips, not finer-grained per-point error
+ *  isolation. */
+const CLONE_SCROLL_BATCH = 256;
+
+/** Copy every point (dense + sparse vectors + payload) from `source` into
+ *  `target`. Both collections must already exist with compatible vector
+ *  configs — this primitive does not create or validate the target schema.
+ *  Returns the number of points copied.
+ *
+ *  Failure semantics: each scroll page is upserted via {@link withRetry}, so
+ *  transient Qdrant blips are absorbed. A persistent failure mid-clone leaves
+ *  a partial target collection — the caller decides whether to fall through
+ *  to a full re-index, prune the partial collection, or retry. */
+export async function cloneCollectionPoints(source: string, target: string): Promise<number> {
+  const qdrant = getClient();
+  let total = 0;
+  let offset: string | number | Record<string, unknown> | undefined;
+
+  while (true) {
+    const page = await qdrant.scroll(source, {
+      limit: CLONE_SCROLL_BATCH,
+      offset,
+      with_payload: true,
+      with_vector: true,
+    });
+    if (page.points.length === 0) break;
+
+    // The named-vector map (dense + bm25) round-trips through scroll → upsert
+    // unchanged on the wire. The client's input vector type (`VectorStruct`)
+    // and output vector type (`VectorStructOutput`) describe the same JSON
+    // shape, but the generated input type also admits server-side inference
+    // unions (Document/Image/InferenceObject) that scroll never returns. We
+    // bridge them by casting the full point list to the input type.
+    const upsertPoints: Schemas["PointStruct"][] = page.points.map((p) => ({
+      id: p.id,
+      vector: p.vector as Schemas["VectorStruct"],
+      payload: p.payload ?? undefined,
+    }));
+    await withRetry(
+      () => qdrant.upsert(target, { points: upsertPoints, wait: false }),
+      `cloneCollectionPoints batch (offset ${String(offset ?? "start")})`,
+    );
+
+    total += upsertPoints.length;
+    if (page.next_page_offset == null) break;
+    offset = page.next_page_offset as string | number | Record<string, unknown>;
+  }
+
+  logger.info("cloneCollectionPoints complete", { source, target, total });
+  return total;
 }
 
 /** Delete all chunks for a specific file (matched by relativePath) */

@@ -2,8 +2,10 @@
 // Copyright (C) 2026 Giancarlo Erra - Altaire Limited
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ensureQdrantReady } from "../../src/services/docker.js";
+import { getEmbeddingConfig } from "../../src/services/embedding-config.js";
 import { ensureOllamaReady } from "../../src/services/ollama.js";
 import {
+  cloneCollectionPoints,
   deleteCollection,
   deleteFileChunks,
   deleteProjectMetadata,
@@ -16,6 +18,7 @@ import {
   saveProjectMetadata,
   searchChunks,
   upsertChunks,
+  upsertPreEmbeddedChunks,
 } from "../../src/services/qdrant.js";
 import type { FileChunk } from "../../src/types.js";
 import { isDockerAvailable } from "../helpers/fixtures.js";
@@ -264,6 +267,45 @@ describe.skipIf(!dockerAvailable)("qdrant service", () => {
         await deleteCollection(collection);
       }
     });
+  });
+
+  describe("cloneCollectionPoints", () => {
+    it(
+      "clones all points from one collection to another",
+      async () => {
+        const source = "test_clone_source";
+        const target = "test_clone_target";
+        const dims = getEmbeddingConfig().embeddingDimensions;
+        try {
+          await ensureCollection(source);
+          await ensureCollection(target);
+
+          // Seed source with 250 points (forces multiple scroll batches).
+          // Vector values are arbitrary — we just need them to be the
+          // configured dimensionality so the collection accepts them.
+          const denseVector = Array.from({ length: dims }, () => 0.1);
+          const points = Array.from({ length: 250 }, (_, i) => ({
+            id: `00000000-0000-0000-0000-${String(i).padStart(12, "0")}`,
+            vector: denseVector,
+            bm25Text: `point ${i}`,
+            payload: { idx: i, relativePath: `file-${i}.ts` },
+          }));
+          await upsertPreEmbeddedChunks(source, points);
+
+          const cloned = await cloneCollectionPoints(source, target);
+          expect(cloned).toBe(250);
+
+          const targetInfo = await getCollectionInfo(target);
+          expect(targetInfo).not.toBeNull();
+          if (targetInfo == null) throw new Error("targetInfo was null");
+          expect(targetInfo.pointsCount).toBe(250);
+        } finally {
+          await deleteCollection(source).catch(() => {});
+          await deleteCollection(target).catch(() => {});
+        }
+      },
+      60_000,
+    );
   });
 
   describe("collection deletion", () => {
