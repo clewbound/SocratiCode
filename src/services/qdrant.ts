@@ -286,6 +286,91 @@ export async function upsertPreEmbeddedChunks(
   return { pointsSkipped: totalSkipped };
 }
 
+/** Maximum total wall time {@link probeWriteReadiness} will spend retrying. */
+const PROBE_TIMEOUT_MS = 30_000;
+/** Backoff between probe attempts. */
+const PROBE_POLL_MS = 500;
+
+/** Cached return type of `qdrant.getCollection(...)` so we can pass the source
+ *  collection's schema into probe helpers without recomputing it. The dense
+ *  vector dim comes from `config.params.vectors.dense.size`. */
+type CollectionInfoResponse = Awaited<ReturnType<QdrantClient["getCollection"]>>;
+
+/** Verify that a freshly-recovered collection accepts writes by inserting a
+ *  sentinel point with `wait: true` and immediately deleting it. recover
+ *  resolves once segments are applied to disk, but a brief warm-up window can
+ *  still reject writes (e.g. segment optimizer pause, BM25 inference engine
+ *  init). Status fields like `status: green` and `optimizer_status: ok` are
+ *  read-side health and don't reliably signal write-readiness. A real
+ *  upsert+delete cycle exercises the actual write path.
+ *
+ *  Throws after {@link PROBE_TIMEOUT_MS} if the upsert keeps failing. The
+ *  caller treats that as a hard failure of the clone path and falls back to
+ *  a full index. */
+async function probeWriteReadiness(target: string, sourceInfo: CollectionInfoResponse): Promise<void> {
+  const qdrant = getClient();
+  const vectorsConfig = sourceInfo.config?.params?.vectors;
+  // VectorsConfig is a union of single-vector params and a dictionary; the
+  // recovered collection here always has a named "dense" entry (we created
+  // the source via `ensureCollection` which only emits the dictionary form).
+  const denseConfig = (vectorsConfig as Record<string, { size?: number } | undefined> | undefined)?.dense;
+  const denseDim = denseConfig?.size;
+  if (typeof denseDim !== "number") {
+    throw new Error(`probeWriteReadiness: source dense vector dim missing (target=${target})`);
+  }
+
+  // Sentinel ID is randomized per call so concurrent probes don't collide.
+  // The all-zero leading bytes keep it visually distinct from sha256-derived
+  // chunk IDs — easy to recognize in logs/inspection.
+  const probeId = `00000000-0000-0000-0000-${Math.floor(Math.random() * 0xffffffffffff).toString(16).padStart(12, "0")}`;
+  const denseVector = new Array<number>(denseDim).fill(0);
+
+  const deadline = Date.now() + PROBE_TIMEOUT_MS;
+  let lastErr: unknown = null;
+
+  while (Date.now() < deadline) {
+    try {
+      await qdrant.upsert(target, {
+        wait: true,
+        points: [
+          {
+            id: probeId,
+            vector: {
+              dense: denseVector,
+              // Raw sparse {indices, values} bypasses Qdrant's server-side
+              // BM25 inference engine, which has its own warm-up cost. We
+              // just need to prove the write path accepts a point.
+              bm25: { indices: [0], values: [0] },
+            },
+            payload: { _socraticode_probe: true },
+          },
+        ],
+      });
+      // Best-effort cleanup; if delete fails we leak one payload-only point
+      // (recoverable on next clone). Don't throw — the readiness signal we
+      // wanted is the successful upsert.
+      await qdrant
+        .delete(target, { wait: true, points: [probeId] })
+        .catch((err) => {
+          logger.warn("probeWriteReadiness: failed to clean up probe point", {
+            target,
+            probeId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        });
+      return;
+    } catch (err) {
+      lastErr = err;
+      await new Promise((r) => setTimeout(r, PROBE_POLL_MS));
+    }
+  }
+
+  throw new Error(
+    `probeWriteReadiness: target "${target}" did not become write-ready within ${PROBE_TIMEOUT_MS}ms. ` +
+      `Last error: ${lastErr instanceof Error ? lastErr.message : String(lastErr)}`,
+  );
+}
+
 /** Resolve the base URL Qdrant should use to fetch its own snapshots during
  *  recover. The recover endpoint pulls the snapshot tarball over HTTP, so the
  *  URL must be reachable from inside the Qdrant process — which is NOT the
@@ -370,6 +455,14 @@ export async function cloneCollectionPoints(source: string, target: string): Pro
       ...(QDRANT_API_KEY ? { api_key: QDRANT_API_KEY } : {}),
     });
 
+    // Verify that the target accepts writes before returning. recoverSnapshot
+    // resolves once segments are applied to disk, but a brief warm-up window
+    // can still reject writes (e.g. BM25 inference engine init, segment
+    // optimizer pause). Status fields like `status: green` are read-side
+    // health — not a write-readiness signal. A 1-point dummy upsert+delete
+    // exercises the actual write path so callers can safely upsert next.
+    await probeWriteReadiness(target, sourceInfo);
+
     const info = await getCollectionInfo(target);
     const got = info?.pointsCount ?? 0;
     if (got < expectedCount) {
@@ -395,12 +488,17 @@ export async function cloneCollectionPoints(source: string, target: string): Pro
   }
 }
 
-/** Delete all chunks for a specific file (matched by relativePath) */
+/** Delete all chunks for a specific file (matched by relativePath).
+ *  Uses `wait: true` so the delete is fully applied before returning — any
+ *  upsert that immediately follows for the same relativePath cannot race the
+ *  in-flight delete and get silently rejected by Qdrant's per-point conflict
+ *  detection. */
 export async function deleteFileChunks(collectionName: string, relativePath: string): Promise<void> {
   const qdrant = getClient();
   logger.info("Deleting file chunks", { collection: collectionName, relativePath });
   await withRetry(
     () => qdrant.delete(collectionName, {
+      wait: true,
       filter: {
         must: [{ key: "relativePath", match: { value: relativePath } }],
       },
@@ -417,7 +515,12 @@ export async function deleteFileChunks(collectionName: string, relativePath: str
  *
  *  Qdrant caps the size of a single filter; if the path list is huge,
  *  we chunk it into batches of `DELETE_BATCH_FILES`. Empty input is a
- *  no-op (avoids issuing a "delete everything" filter). */
+ *  no-op (avoids issuing a "delete everything" filter).
+ *
+ *  Uses `wait: true` so the delete is fully applied before returning. The
+ *  sibling-clone path immediately follows this with upserts on the same
+ *  paths; without `wait: true` Qdrant's default async delete can still be
+ *  in flight when the upsert lands, causing per-point rejections. */
 const DELETE_BATCH_FILES = 1000;
 export async function deleteFileChunksBatch(
   collectionName: string,
@@ -434,6 +537,7 @@ export async function deleteFileChunksBatch(
     await withRetry(
       () =>
         qdrant.delete(collectionName, {
+          wait: true,
           filter: {
             must: [{ key: "relativePath", match: { any: batch as string[] } }],
           },

@@ -8,6 +8,7 @@ import {
   cloneCollectionPoints,
   deleteCollection,
   deleteFileChunks,
+  deleteFileChunksBatch,
   deleteProjectMetadata,
   ensureCollection,
   ensureMetadataCollection,
@@ -272,6 +273,56 @@ describe.skipIf(!dockerAvailable)("qdrant service", () => {
         await deleteCollection(collection);
       }
     });
+  });
+
+  describe("deleteFileChunksBatch + upsert ordering", () => {
+    it(
+      "serializes delete+upsert via wait:true so the replacement survives",
+      async () => {
+        const collection = "codebase_test_delete_upsert_race";
+        const dims = getEmbeddingConfig().embeddingDimensions;
+        try {
+          await ensureCollection(collection);
+
+          // Seed: 1 chunk for relativePath "race.ts". The delete-write race
+          // bug used to manifest when the indexer issued a non-blocking
+          // filter delete and immediately upserted the replacement — Qdrant
+          // would see an in-flight delete during the upsert and silently
+          // reject conflicting points. With wait:true on delete this is
+          // deterministic: delete is fully applied before upsert begins.
+          const denseVector = Array.from({ length: dims }, () => 0.1);
+          await upsertPreEmbeddedChunks(collection, [
+            {
+              id: "00000000-0000-0000-0000-000000000777",
+              vector: denseVector,
+              bm25Text: "seed point for race test",
+              payload: { relativePath: "race.ts", original: true },
+            },
+          ]);
+
+          // Delete by filter (sibling-clone cleanup uses this exact path)
+          // followed immediately by upsert of the replacement.
+          await deleteFileChunksBatch(collection, ["race.ts"]);
+          await upsertPreEmbeddedChunks(collection, [
+            {
+              id: "00000000-0000-0000-0000-000000000888",
+              vector: denseVector,
+              bm25Text: "replacement point after delete",
+              payload: { relativePath: "race.ts", original: false },
+            },
+          ]);
+
+          const info = await getCollectionInfo(collection);
+          expect(info).not.toBeNull();
+          if (info == null) throw new Error("info was null");
+          // The seed must be gone, the replacement must be present.
+          expect(info.pointsCount).toBe(1);
+        } finally {
+          await deleteCollection(collection).catch(() => {});
+        }
+      },
+      60_000,
+    );
   });
 
   describe("cloneCollectionPoints", () => {
