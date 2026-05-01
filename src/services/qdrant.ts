@@ -314,12 +314,6 @@ function resolveQdrantBaseUrl(): string {
   return `${scheme}://${QDRANT_HOST}:${QDRANT_PORT}`;
 }
 
-/** Maximum time to wait for the target's reported point count to catch up to
- *  the source after recover returns. Recover is mostly synchronous, but
- *  Qdrant's reported count can lag by a few hundred ms while segments settle. */
-const CLONE_CONVERGENCE_TIMEOUT_MS = 60_000;
-const CLONE_CONVERGENCE_POLL_MS = 200;
-
 /** Copy every point (dense + sparse vectors + payload) from `source` into
  *  `target` using Qdrant's snapshot + recover primitives. The target
  *  collection MUST NOT EXIST when this is called — recover auto-creates the
@@ -331,22 +325,23 @@ const CLONE_CONVERGENCE_POLL_MS = 200;
  *  no per-point JSON serialization, no BM25 re-tokenization. ~14× faster
  *  than scroll+upsert on the prod-equivalent 125k-point workload.
  *
+ *  Both `createSnapshot` and `recoverSnapshot` block server-side until their
+ *  work is fully complete (Qdrant returns the response after the segments
+ *  are tar'd / the target collection is populated). A single follow-up
+ *  `getCollectionInfo` confirms the count parity; if it's short, that's a
+ *  bug we want to surface, not absorb with a retry loop.
+ *
  *  Concurrency assumption: source is treated as quiescent during clone.
- *  Writes to source between `getCollection` (line below) and `createSnapshot`
- *  may shift `expectedCount` upward — convergence uses `>=` so that's safe;
- *  rolled-back writes could over-extend the wait. In practice each branch
- *  collection is owned by one indexProject run at a time, so concurrent
- *  writes shouldn't happen.
+ *  In practice each branch collection is owned by one indexProject run at
+ *  a time, so concurrent writes shouldn't happen.
  *
  *  Failure semantics:
  *    - createSnapshot errors are propagated; no cleanup needed (no target
  *      was created).
- *    - recoverSnapshot or convergence-deadline errors are propagated, but
- *      target collection has already been auto-created by recover and may
- *      be in a partial state. Callers MUST drop the partial target before
- *      falling through to a re-index path.
- *    - The source-side snapshot is deleted best-effort in `finally`; a
- *      cleanup failure is logged but does not fail the clone. */
+ *    - recoverSnapshot errors are propagated, but target collection has
+ *      already been auto-created and may be in a partial state. Callers
+ *      MUST drop the partial target before falling through.
+ *    - The source-side snapshot is deleted best-effort in `finally`. */
 export async function cloneCollectionPoints(source: string, target: string): Promise<number> {
   const qdrant = getClient();
 
@@ -375,24 +370,20 @@ export async function cloneCollectionPoints(source: string, target: string): Pro
       ...(QDRANT_API_KEY ? { api_key: QDRANT_API_KEY } : {}),
     });
 
-    const deadline = Date.now() + CLONE_CONVERGENCE_TIMEOUT_MS;
-    while (Date.now() < deadline) {
-      const info = await getCollectionInfo(target);
-      const got = info?.pointsCount ?? 0;
-      if (got >= expectedCount) {
-        logger.info("cloneCollectionPoints (snapshot+recover) complete", {
-          source,
-          target,
-          expectedCount,
-          got,
-        });
-        return got;
-      }
-      await new Promise((r) => setTimeout(r, CLONE_CONVERGENCE_POLL_MS));
+    const info = await getCollectionInfo(target);
+    const got = info?.pointsCount ?? 0;
+    if (got < expectedCount) {
+      throw new Error(
+        `cloneCollectionPoints: recover from "${source}" to "${target}" reported success but only ${got}/${expectedCount} points landed`,
+      );
     }
-    throw new Error(
-      `cloneCollectionPoints: recover from "${source}" to "${target}" did not converge within ${CLONE_CONVERGENCE_TIMEOUT_MS}ms (expected ${expectedCount})`,
-    );
+    logger.info("cloneCollectionPoints (snapshot+recover) complete", {
+      source,
+      target,
+      expectedCount,
+      got,
+    });
+    return got;
   } finally {
     await qdrant.deleteSnapshot(source, snapshotName).catch((err) => {
       logger.warn("cloneCollectionPoints: failed to cleanup source snapshot", {
