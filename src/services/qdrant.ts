@@ -409,6 +409,40 @@ export async function deleteFileChunks(collectionName: string, relativePath: str
   );
 }
 
+/** Delete chunks for many files in a single Qdrant filter delete using
+ *  `match: { any: [...] }`. Replaces N sequential per-file deletes (and
+ *  N round-trips) with one round-trip — a meaningful win when the diff
+ *  set is in the hundreds-to-thousands range, e.g. post sibling-clone
+ *  cleanup.
+ *
+ *  Qdrant caps the size of a single filter; if the path list is huge,
+ *  we chunk it into batches of `DELETE_BATCH_FILES`. Empty input is a
+ *  no-op (avoids issuing a "delete everything" filter). */
+const DELETE_BATCH_FILES = 1000;
+export async function deleteFileChunksBatch(
+  collectionName: string,
+  relativePaths: readonly string[],
+): Promise<void> {
+  if (relativePaths.length === 0) return;
+  const qdrant = getClient();
+  logger.info("Deleting file chunks (batched)", {
+    collection: collectionName,
+    fileCount: relativePaths.length,
+  });
+  for (let i = 0; i < relativePaths.length; i += DELETE_BATCH_FILES) {
+    const batch = relativePaths.slice(i, i + DELETE_BATCH_FILES);
+    await withRetry(
+      () =>
+        qdrant.delete(collectionName, {
+          filter: {
+            must: [{ key: "relativePath", match: { any: batch as string[] } }],
+          },
+        }),
+      `Qdrant delete chunks batch (${i}-${i + batch.length})`,
+    );
+  }
+}
+
 /** Hybrid search: combines dense semantic search with BM25 lexical search via RRF fusion.
  * Dense vector is generated client-side; BM25 inference runs server-side in Qdrant (requires v1.15.2+). */
 export async function searchChunks(

@@ -31,6 +31,7 @@ import {
   cloneCollectionPoints,
   deleteCollection,
   deleteFileChunks,
+  deleteFileChunksBatch,
   deleteProjectMetadata,
   ensureCollection,
   findSiblingMetadata,
@@ -1175,14 +1176,15 @@ export async function indexProject(
         );
         onProgress?.(`Cloned ${cloned} points from ${sibling.collectionName}.`);
 
-        // Drop chunks for files that no longer exist on the target branch.
-        for (const filePath of diff.deleted) {
-          await deleteFileChunks(collection, filePath);
-        }
-        // Modified files: delete cleanly so re-chunk upserts don't leave stale
-        // chunks at line positions that no longer exist after edit.
-        for (const filePath of diff.modified) {
-          await deleteFileChunks(collection, filePath);
+        // Drop chunks for files that changed (modified) or no longer exist
+        // (deleted). Batched into a single filter delete with a path-IN
+        // clause — N round-trips → 1 — so post-clone cleanup doesn't dominate
+        // wall time when the diff is in the thousands.
+        const stalePaths = [...diff.deleted, ...diff.modified];
+        if (stalePaths.length > 0) {
+          progress.phase = "cleaning stale chunks";
+          await deleteFileChunksBatch(collection, stalePaths);
+          onProgress?.(`Pruned chunks for ${stalePaths.length} stale files.`);
         }
 
         // Seed `hashes` with the unchanged paths' content hashes so the scan
