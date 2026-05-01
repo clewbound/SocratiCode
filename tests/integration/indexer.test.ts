@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Giancarlo Erra - Altaire Limited
 
 import { execSync } from "node:child_process";
+import { writeFileSync } from "node:fs";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { collectionName, projectIdFromPath } from "../../src/config.js";
@@ -397,6 +398,177 @@ describe.skipIf(!dockerAvailable)("indexer service — same-collection fast-skip
 
         expect(elapsedMs).toBeLessThan(30_000);
         expect(second.chunksCreated).toBe(0);
+      } finally {
+        try {
+          await removeProjectIndex(fixture.root);
+        } catch {
+          // ignore
+        }
+        delete process.env.SOCRATICODE_PROJECT_ID;
+        fixture.cleanup();
+      }
+    },
+    300_000,
+  );
+});
+
+describe.skipIf(!dockerAvailable)("indexer service — sibling-clone fast path", () => {
+  beforeAll(async () => {
+    await ensureQdrantReady();
+    await ensureOllamaReady();
+    await waitForQdrant();
+    await waitForOllama();
+  });
+
+  // Initialise a fixture as a git repo and stage every file so getGitBlobShas
+  // can produce blob shas. Mirrors the same-collection fast-skip test setup.
+  function initGitFixture(fixture: FixtureProject): void {
+    const gitOpts = {
+      cwd: fixture.root,
+      stdio: "ignore" as const,
+      env: {
+        ...process.env,
+        GIT_AUTHOR_NAME: "Sibling Clone Test",
+        GIT_AUTHOR_EMAIL: "sibling-clone@example.com",
+        GIT_COMMITTER_NAME: "Sibling Clone Test",
+        GIT_COMMITTER_EMAIL: "sibling-clone@example.com",
+      },
+    };
+    execSync("git init -q", gitOpts);
+    execSync("git add -A", gitOpts);
+    execSync("git commit -q -m initial", gitOpts);
+  }
+
+  function commitFileChange(fixture: FixtureProject, relativePath: string, newContent: string): void {
+    const fullPath = path.join(fixture.root, relativePath);
+    writeFileSync(fullPath, newContent);
+    const gitOpts = {
+      cwd: fixture.root,
+      stdio: "ignore" as const,
+      env: {
+        ...process.env,
+        GIT_AUTHOR_NAME: "Sibling Clone Test",
+        GIT_AUTHOR_EMAIL: "sibling-clone@example.com",
+        GIT_COMMITTER_NAME: "Sibling Clone Test",
+        GIT_COMMITTER_EMAIL: "sibling-clone@example.com",
+      },
+    };
+    execSync(`git add ${relativePath}`, gitOpts);
+    execSync(`git commit -q -m "modify ${relativePath}"`, gitOpts);
+  }
+
+  it(
+    "indexes a fresh collection in seconds when content matches sibling",
+    async () => {
+      const fixture = createFixtureProject("clone-no-diff");
+      try {
+        initGitFixture(fixture);
+
+        process.env.SOCRATICODE_PROJECT_ID = "clone-test-source";
+        const first = await indexProject(fixture.root);
+        expect(first.chunksCreated).toBeGreaterThan(0);
+
+        // Re-index under a different project ID with the same content.
+        process.env.SOCRATICODE_PROJECT_ID = "clone-test-target";
+        const messages: string[] = [];
+        const start = Date.now();
+        const result = await indexProject(fixture.root, (m) => messages.push(m));
+        const elapsedMs = Date.now() - start;
+
+        expect(messages.some((m) => /sibling.clone|cloned.*\d+ points|fast.path/i.test(m))).toBe(true);
+        expect(elapsedMs).toBeLessThan(60_000);
+        expect(result.chunksCreated).toBe(0);
+      } finally {
+        for (const projectId of ["clone-test-source", "clone-test-target"]) {
+          process.env.SOCRATICODE_PROJECT_ID = projectId;
+          try {
+            await removeProjectIndex(fixture.root);
+          } catch {
+            // ignore
+          }
+        }
+        delete process.env.SOCRATICODE_PROJECT_ID;
+        fixture.cleanup();
+      }
+    },
+    300_000,
+  );
+
+  it(
+    "scans only the diff when a file is modified",
+    async () => {
+      const fixture = createFixtureProject("clone-with-diff");
+      try {
+        initGitFixture(fixture);
+
+        process.env.SOCRATICODE_PROJECT_ID = "clone-diff-source";
+        const first = await indexProject(fixture.root);
+        const baselineChunks = first.chunksCreated;
+        expect(baselineChunks).toBeGreaterThan(0);
+
+        // Modify a single file already created by the fixture.
+        commitFileChange(
+          fixture,
+          "src/utils/math.ts",
+          `// changed
+export function add(a: number, b: number): number {
+  return a + b + 0;
+}
+
+export function fibonacci(n: number): number {
+  // Brand new fibonacci with detailed tail-call discussion to ensure new
+  // chunks are produced even on a small file.
+  if (n < 2) return n;
+  let prev = 0;
+  let curr = 1;
+  for (let i = 2; i <= n; i++) {
+    const next = prev + curr;
+    prev = curr;
+    curr = next;
+  }
+  return curr;
+}
+`,
+        );
+
+        process.env.SOCRATICODE_PROJECT_ID = "clone-diff-target";
+        const messages: string[] = [];
+        const start = Date.now();
+        const result = await indexProject(fixture.root, (m) => messages.push(m));
+        const elapsedMs = Date.now() - start;
+
+        expect(messages.some((m) => /sibling.clone/i.test(m))).toBe(true);
+        expect(result.chunksCreated).toBeGreaterThan(0);
+        expect(result.chunksCreated).toBeLessThan(baselineChunks);
+        expect(elapsedMs).toBeLessThan(120_000);
+      } finally {
+        for (const projectId of ["clone-diff-source", "clone-diff-target"]) {
+          process.env.SOCRATICODE_PROJECT_ID = projectId;
+          try {
+            await removeProjectIndex(fixture.root);
+          } catch {
+            // ignore
+          }
+        }
+        delete process.env.SOCRATICODE_PROJECT_ID;
+        fixture.cleanup();
+      }
+    },
+    300_000,
+  );
+
+  it(
+    "falls through to full index when no sibling exists",
+    async () => {
+      const fixture = createFixtureProject("clone-no-sibling");
+      try {
+        initGitFixture(fixture);
+
+        process.env.SOCRATICODE_PROJECT_ID = `clone-fresh-${Date.now()}`;
+        const messages: string[] = [];
+        const result = await indexProject(fixture.root, (m) => messages.push(m));
+        expect(messages.some((m) => /sibling.clone/i.test(m))).toBe(false);
+        expect(result.chunksCreated).toBeGreaterThan(0);
       } finally {
         try {
           await removeProjectIndex(fixture.root);

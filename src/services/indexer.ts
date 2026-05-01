@@ -23,15 +23,17 @@ import { ensureDynamicLanguages, getAstGrepLang, rebuildGraph, removeGraph } fro
 import { ensureArtifactsIndexed, loadConfig, removeAllArtifacts } from "./context-artifacts.js";
 import { type CachedEmbedding, lookupEmbeddings, putEmbedding } from "./embedding-cache.js";
 import { generateEmbeddings, prepareDocumentText } from "./embeddings.js";
-import { getGitBlobShas } from "./git-tree.js";
+import { diffGitTrees, getGitBlobShas } from "./git-tree.js";
 import { createIgnoreFilter, shouldIgnore } from "./ignore.js";
 import { acquireProjectLock, releaseProjectLock } from "./lock.js";
 import { logger } from "./logger.js";
 import {
+  cloneCollectionPoints,
   deleteCollection,
   deleteFileChunks,
   deleteProjectMetadata,
   ensureCollection,
+  findSiblingMetadata,
   getCollectionInfo,
   getProjectMetadata,
   loadProjectGitBlobShas,
@@ -1120,6 +1122,152 @@ export async function indexProject(
         chunksCreated: 0,
       });
       return { filesIndexed: hashes.size, chunksCreated: 0, cancelled: false };
+    }
+  }
+
+  // ── Fast-path: sibling-clone ──
+  // Bootstrapping a new (or empty) collection? Look for a sibling collection
+  // whose gitBlobShas overlap with the current working tree. If found:
+  //   1. Clone all of sibling's points into the target (~30s for 125k chunks).
+  //   2. Diff the trees (unchanged / modified / added / deleted).
+  //   3. Delete chunks for modified + deleted files (modified files re-chunk
+  //      below; explicit delete prevents stale chunks at line offsets that
+  //      no longer exist after edits).
+  //   4. Run scan + embed only on (modified + added) — most files are reused.
+  //   5. Save metadata with current gitBlobShas so future runs hit fast paths.
+  //
+  // On any error during clone, we fall through to the normal full-index path
+  // below. The collection we partially populated will be overwritten by the
+  // upsert calls in scanAndIndexFiles.
+  const collectionEmpty = !hasExistingData;
+  if (
+    collectionEmpty &&
+    currentGitBlobShas !== null &&
+    currentGitBlobShas.size > 0
+  ) {
+    const sibling = await findSiblingMetadata(
+      resolvedPath,
+      currentGitBlobShas,
+      collection,
+    ).catch((err) => {
+      logger.warn("findSiblingMetadata failed (treating as no sibling)", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return null;
+    });
+
+    if (sibling !== null) {
+      const diff = diffGitTrees(sibling.gitBlobShas, currentGitBlobShas);
+      onProgress?.(
+        `Sibling-clone candidate: ${sibling.collectionName} (${sibling.matchCount}/${currentGitBlobShas.size} files match). ` +
+          `Diff: ${diff.unchanged.length} unchanged, ${diff.modified.length} modified, ` +
+          `${diff.added.length} added, ${diff.deleted.length} deleted.`,
+      );
+
+      try {
+        progress.phase = "cloning sibling collection";
+        const cloned = await cloneCollectionPoints(
+          sibling.collectionName,
+          collection,
+        );
+        onProgress?.(`Cloned ${cloned} points from ${sibling.collectionName}.`);
+
+        // Drop chunks for files that no longer exist on the target branch.
+        for (const filePath of diff.deleted) {
+          await deleteFileChunks(collection, filePath);
+        }
+        // Modified files: delete cleanly so re-chunk upserts don't leave stale
+        // chunks at line positions that no longer exist after edit.
+        for (const filePath of diff.modified) {
+          await deleteFileChunks(collection, filePath);
+        }
+
+        // Seed `hashes` with the unchanged paths' content hashes so the scan
+        // helper's skip-by-hash short-circuit kicks in immediately for any
+        // unchanged file that does end up in the scan set.
+        for (const unchangedPath of diff.unchanged) {
+          const sha = sibling.fileHashes.get(unchangedPath);
+          if (sha !== undefined) hashes.set(unchangedPath, sha);
+        }
+
+        // Build the path subset to scan: modified + added only.
+        const subsetSet = new Set<string>([...diff.modified, ...diff.added]);
+        const allFiles = await getIndexableFiles(resolvedPath, extraExtensions);
+        const targetFiles = allFiles.filter((p) => subsetSet.has(p));
+        progress.filesTotal = allFiles.length;
+        onProgress?.(
+          `Indexing ${targetFiles.length} changed file${targetFiles.length === 1 ? "" : "s"} (${diff.unchanged.length} reused via clone).`,
+        );
+
+        const cloneResult = await scanAndIndexFiles({
+          resolvedPath,
+          collection,
+          hashes,
+          targetFiles,
+          progress,
+          onProgress,
+          // We just cloned points into the collection; treat as existing data
+          // so the helper's skip-by-hash + stale-chunk paths behave correctly.
+          hasExistingData: true,
+        });
+
+        if (cloneResult.cancelled) {
+          return cloneResult;
+        }
+
+        progress.phase = "building code graph";
+        try {
+          const graph = await rebuildGraph(resolvedPath);
+          onProgress?.(
+            `Code graph: ${graph.nodes.length} files, ${graph.edges.length} edges`,
+          );
+        } catch (graphErr) {
+          const graphMsg =
+            graphErr instanceof Error ? graphErr.message : String(graphErr);
+          logger.warn(
+            "Code graph build failed during sibling-clone (non-fatal)",
+            { projectPath: resolvedPath, error: graphMsg },
+          );
+        }
+
+        progress.phase = "saving metadata";
+        await saveProjectMetadata(
+          collection,
+          resolvedPath,
+          allFiles.length,
+          hashes.size,
+          hashes,
+          "completed",
+          { gitBlobShas: currentGitBlobShas },
+        );
+
+        const totalFilesIndexed =
+          cloneResult.filesIndexed + diff.unchanged.length;
+        onProgress?.(
+          `Indexing complete (sibling-clone): ${totalFilesIndexed} files, ${cloneResult.chunksCreated} chunks`,
+        );
+        lastCompleted.set(resolvedPath, {
+          type: "full-index",
+          completedAt: Date.now(),
+          durationMs: Date.now() - progress.startedAt,
+          filesProcessed: totalFilesIndexed,
+          chunksCreated: cloneResult.chunksCreated,
+        });
+        return {
+          filesIndexed: totalFilesIndexed,
+          chunksCreated: cloneResult.chunksCreated,
+          cancelled: false,
+        };
+      } catch (cloneErr) {
+        logger.warn(
+          "Sibling-clone fast path failed; falling through to full index",
+          {
+            sibling: sibling.collectionName,
+            error: cloneErr instanceof Error ? cloneErr.message : String(cloneErr),
+          },
+        );
+        // Fall through to normal flow below.
+      }
     }
   }
 
