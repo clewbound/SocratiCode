@@ -84,10 +84,12 @@ describe("diffGitTrees", () => {
       ["added.ts", "ddd"],
     ]);
     const diff = diffGitTrees(prev, curr);
-    expect([...diff.unchanged].sort()).toEqual(["unchanged.ts"]);
-    expect([...diff.modified].sort()).toEqual(["modified.ts"]);
-    expect([...diff.added].sort()).toEqual(["added.ts"]);
-    expect([...diff.deleted].sort()).toEqual(["deleted.ts"]);
+    expect(diff).toEqual({
+      unchanged: ["unchanged.ts"],
+      modified: ["modified.ts"],
+      added: ["added.ts"],
+      deleted: ["deleted.ts"],
+    });
   });
 
   it("returns all unchanged when maps are identical", () => {
@@ -96,16 +98,45 @@ describe("diffGitTrees", () => {
       ["b.ts", "222"],
     ]);
     const diff = diffGitTrees(m, new Map(m));
-    expect(diff.unchanged.length).toBe(2);
-    expect(diff.modified.length).toBe(0);
-    expect(diff.added.length).toBe(0);
-    expect(diff.deleted.length).toBe(0);
+    expect(diff).toEqual({
+      unchanged: ["a.ts", "b.ts"],
+      modified: [],
+      added: [],
+      deleted: [],
+    });
   });
 
   it("treats empty prev as everything added", () => {
     const curr = new Map([["a.ts", "111"]]);
     const diff = diffGitTrees(new Map(), curr);
-    expect(diff.added).toEqual(["a.ts"]);
-    expect(diff.unchanged.length).toBe(0);
+    expect(diff).toEqual({
+      unchanged: [],
+      modified: [],
+      added: ["a.ts"],
+      deleted: [],
+    });
+  });
+
+  it("preserves insertion order from input Maps within each bucket", () => {
+    // Multiple paths landing in the same bucket — locks the deterministic
+    // ordering contract documented on diffGitTrees.
+    const prev = new Map([
+      ["z.ts", "z-old"],
+      ["m.ts", "m-old"],
+      ["a.ts", "a-old"],
+      ["gone.ts", "gone-sha"],
+    ]);
+    const curr = new Map([
+      ["z.ts", "z-new"], // modified, ordered first in curr
+      ["m.ts", "m-old"], // unchanged, second
+      ["a.ts", "a-new"], // modified, third
+      ["new1.ts", "n1"], // added, fourth
+      ["new2.ts", "n2"], // added, fifth
+    ]);
+    const diff = diffGitTrees(prev, curr);
+    expect(diff.modified).toEqual(["z.ts", "a.ts"]);
+    expect(diff.unchanged).toEqual(["m.ts"]);
+    expect(diff.added).toEqual(["new1.ts", "new2.ts"]);
+    expect(diff.deleted).toEqual(["gone.ts"]);
   });
 });
