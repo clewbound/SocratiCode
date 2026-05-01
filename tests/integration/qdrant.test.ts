@@ -10,11 +10,16 @@ import {
   deleteFileChunks,
   deleteProjectMetadata,
   ensureCollection,
+  ensureMetadataCollection,
+  findSiblingMetadata,
+  getClient,
   getCollectionInfo,
   getProjectMetadata,
   listCodebaseCollections,
   loadProjectGitBlobShas,
   loadProjectHashes,
+  METADATA_COLLECTION,
+  metadataPointId,
   saveProjectMetadata,
   searchChunks,
   upsertChunks,
@@ -304,6 +309,85 @@ describe.skipIf(!dockerAvailable)("qdrant service", () => {
         } finally {
           await deleteCollection(source).catch(() => {});
           await deleteCollection(target).catch(() => {});
+        }
+      },
+      60_000,
+    );
+  });
+
+  describe("findSiblingMetadata", () => {
+    it(
+      "returns the most-overlapping sibling for a project path",
+      async () => {
+        const projA = "project-a-1";
+        const projA2 = "project-a-2";
+        const projB = "project-b-1";
+        const fakePath = "/tmp/findsibling-fixture";
+
+        await ensureMetadataCollection();
+        await saveProjectMetadata(
+          projA,
+          fakePath,
+          1,
+          1,
+          new Map([["a.ts", "h1"]]),
+          "completed",
+          {
+            gitBlobShas: new Map([
+              ["a.ts", "00".repeat(20)],
+              ["b.ts", "11".repeat(20)],
+            ]),
+          },
+        );
+        await saveProjectMetadata(
+          projA2,
+          fakePath,
+          1,
+          1,
+          new Map([["a.ts", "h1"]]),
+          "completed",
+          { gitBlobShas: new Map([["a.ts", "00".repeat(20)]]) }, // 1 overlap
+        );
+        await saveProjectMetadata(
+          projB,
+          "/tmp/different-project",
+          1,
+          1,
+          new Map([["x.ts", "h2"]]),
+          "completed",
+          {
+            gitBlobShas: new Map([
+              ["a.ts", "00".repeat(20)],
+              ["b.ts", "11".repeat(20)],
+            ]),
+          },
+        );
+
+        try {
+          const target = new Map([
+            ["a.ts", "00".repeat(20)],
+            ["b.ts", "11".repeat(20)],
+          ]);
+          const result = await findSiblingMetadata(fakePath, target, projA);
+          // projA was excluded — projA2 has 1 overlap, projB excluded by projectPath
+          expect(result).not.toBeNull();
+          if (result == null) throw new Error("result was null");
+          expect(result.collectionName).toBe(projA2);
+          expect(result.matchCount).toBe(1);
+
+          // Now query without exclusion: projA wins outright
+          const without = await findSiblingMetadata(fakePath, target);
+          expect(without).not.toBeNull();
+          if (without == null) throw new Error("without was null");
+          expect(without.collectionName).toBe(projA);
+          expect(without.matchCount).toBe(2);
+        } finally {
+          const qdrant = getClient();
+          for (const c of [projA, projA2, projB]) {
+            await qdrant
+              .delete(METADATA_COLLECTION, { points: [metadataPointId(c)] })
+              .catch(() => {});
+          }
         }
       },
       60_000,

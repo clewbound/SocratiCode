@@ -586,7 +586,7 @@ export async function getCollectionInfo(name: string): Promise<{
 
 // ── Project metadata collection ──────────────────────────────────────────
 
-const METADATA_COLLECTION = "socraticode_metadata";
+export const METADATA_COLLECTION = "socraticode_metadata";
 
 /** Cached flag: once the metadata collection is confirmed to exist, skip re-checking */
 let metadataCollectionReady = false;
@@ -597,7 +597,7 @@ export function resetMetadataCollectionCache(): void {
 }
 
 /** Ensure the metadata collection exists (idempotent, cached after first success) */
-async function ensureMetadataCollection(): Promise<void> {
+export async function ensureMetadataCollection(): Promise<void> {
   if (metadataCollectionReady) return;
 
   const qdrant = getClient();
@@ -663,7 +663,7 @@ export async function ensureEmbeddingCacheCollection(): Promise<void> {
 
 /** Generate a stable UUID from a collection name (for Qdrant point ID).
  *  Uses SHA-256 to avoid collision risk inherent in simpler hashes (e.g. djb2). */
-function metadataPointId(collName: string): string {
+export function metadataPointId(collName: string): string {
   const hash = createHash("sha256").update(collName).digest("hex").slice(0, 32);
   // Format as UUID: 8-4-4-4-12
   return `${hash.slice(0, 8)}-${hash.slice(8, 12)}-${hash.slice(12, 16)}-${hash.slice(16, 20)}-${hash.slice(20, 32)}`;
@@ -800,6 +800,91 @@ export async function loadProjectGitBlobShas(collName: string): Promise<Map<stri
     });
     return null;
   }
+}
+
+/** Result of {@link findSiblingMetadata}: the candidate sibling collection plus
+ *  enough hash material for the caller to seed a fast-path index. */
+export interface SiblingMetadata {
+  collectionName: string;
+  fileHashes: Map<string, string>;
+  gitBlobShas: Map<string, string>;
+  matchCount: number;
+}
+
+/** Find the sibling collection (different collection name, same projectPath)
+ *  whose stored gitBlobShas overlap most with the supplied `currentBlobShas`.
+ *  `excludeCollection` lets the caller skip the in-progress target so it isn't
+ *  considered as its own sibling.
+ *
+ *  Implementation: scrolls METADATA_COLLECTION with a payload filter on
+ *  projectPath, materializes candidates client-side (project metadata is
+ *  dozens of points per host, not millions — scanning is fine), and returns
+ *  the best match plus its file/blob hash maps. Returns null when no
+ *  candidate exists for the projectPath, when every candidate is excluded,
+ *  or when no candidate has any overlap with `currentBlobShas`. */
+export async function findSiblingMetadata(
+  projectPath: string,
+  currentBlobShas: Map<string, string>,
+  excludeCollection?: string,
+): Promise<SiblingMetadata | null> {
+  await ensureMetadataCollection();
+  const qdrant = getClient();
+
+  let bestMatch = -1;
+  let best: SiblingMetadata | null = null;
+  let offset: string | number | Record<string, unknown> | undefined;
+
+  while (true) {
+    const page = await qdrant.scroll(METADATA_COLLECTION, {
+      limit: 256,
+      offset,
+      with_payload: true,
+      with_vector: false,
+      filter: {
+        must: [{ key: "projectPath", match: { value: projectPath } }],
+      },
+    });
+
+    for (const point of page.points) {
+      const payload = point.payload;
+      const collName = payload?.collectionName;
+      if (typeof collName !== "string") continue;
+      if (excludeCollection !== undefined && collName === excludeCollection) continue;
+
+      const blobsRaw = payload?.gitBlobShas;
+      if (typeof blobsRaw !== "string") continue;
+      let blobs: Map<string, string>;
+      try {
+        blobs = new Map(Object.entries(JSON.parse(blobsRaw) as Record<string, string>));
+      } catch {
+        continue;
+      }
+
+      let matchCount = 0;
+      for (const [path, sha] of currentBlobShas) {
+        if (blobs.get(path) === sha) matchCount++;
+      }
+
+      if (matchCount > bestMatch) {
+        const hashesRaw = payload?.fileHashes;
+        let fileHashes = new Map<string, string>();
+        if (typeof hashesRaw === "string") {
+          try {
+            fileHashes = new Map(Object.entries(JSON.parse(hashesRaw) as Record<string, string>));
+          } catch {
+            continue;
+          }
+        }
+        bestMatch = matchCount;
+        best = { collectionName: collName, fileHashes, gitBlobShas: blobs, matchCount };
+      }
+    }
+
+    if (page.next_page_offset == null) break;
+    offset = page.next_page_offset as string | number | Record<string, unknown>;
+  }
+
+  return bestMatch > 0 ? best : null;
 }
 
 /** Get project metadata (for list display).
