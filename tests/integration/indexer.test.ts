@@ -540,7 +540,7 @@ export function fibonacci(n: number): number {
         expect(messages.some((m) => /sibling.clone/i.test(m))).toBe(true);
         expect(result.chunksCreated).toBeGreaterThan(0);
         expect(result.chunksCreated).toBeLessThan(baselineChunks);
-        expect(elapsedMs).toBeLessThan(120_000);
+        expect(elapsedMs).toBeLessThan(90_000);
       } finally {
         for (const projectId of ["clone-diff-source", "clone-diff-target"]) {
           process.env.SOCRATICODE_PROJECT_ID = projectId;
