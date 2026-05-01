@@ -558,6 +558,95 @@ export function fibonacci(n: number): number {
   );
 
   it(
+    "preserves cloned chunks for unchanged files when one file is modified (regression)",
+    async () => {
+      // Regression test for the bug where scanAndIndexFiles' cleanup loop
+      // deleted chunks for every path in `hashes` that wasn't in `targetFiles`.
+      // The sibling-clone gate seeds `hashes` with diff.unchanged paths and
+      // passes `targetFiles = modified ∪ added`, so every unchanged path was
+      // misidentified as deleted and its chunks were destroyed. The fix
+      // passes `currentFileSet = new Set(allFiles)` so the cleanup loop only
+      // evicts chunks for files genuinely missing from disk.
+      const fixture = createFixtureProject("clone-preserve-unchanged");
+      try {
+        initGitFixture(fixture);
+
+        process.env.SOCRATICODE_PROJECT_ID = "clone-preserve-source";
+        const first = await indexProject(fixture.root);
+        expect(first.chunksCreated).toBeGreaterThan(0);
+
+        // Modify one file. Other fixture files (src/index.ts, src/types.ts,
+        // src/utils/helpers.ts, lib/data_processor.py, README.md, package.json)
+        // remain unchanged and their chunks must survive the clone.
+        commitFileChange(
+          fixture,
+          "src/utils/math.ts",
+          `// changed
+export function add(a: number, b: number): number {
+  return a + b + 0;
+}
+`,
+        );
+
+        process.env.SOCRATICODE_PROJECT_ID = "clone-preserve-target";
+        const messages: string[] = [];
+        const result = await indexProject(fixture.root, (m) => messages.push(m));
+        expect(messages.some((m) => /sibling.clone/i.test(m))).toBe(true);
+        expect(result.chunksCreated).toBeGreaterThan(0);
+
+        const targetCollection = collectionName("clone-preserve-target");
+        const qdrant = (await import("../../src/services/qdrant.js")).getClient();
+
+        // Pull all points whose relativePath matches an unchanged file.
+        // searchChunks with a fileFilter does prefix-style matching via
+        // payload, but `qdrant.scroll` with an exact-value filter is the
+        // most precise way to count surviving chunks for a given path.
+        async function countChunksForPath(relPath: string): Promise<number> {
+          const scrolled = await qdrant.scroll(targetCollection, {
+            limit: 50,
+            with_payload: false,
+            with_vector: false,
+            filter: {
+              must: [{ key: "relativePath", match: { value: relPath } }],
+            },
+          });
+          return scrolled.points.length;
+        }
+
+        const unchangedSurvivors = {
+          "src/index.ts": await countChunksForPath("src/index.ts"),
+          "src/types.ts": await countChunksForPath("src/types.ts"),
+          "src/utils/helpers.ts": await countChunksForPath("src/utils/helpers.ts"),
+          "lib/data_processor.py": await countChunksForPath("lib/data_processor.py"),
+        };
+
+        // Each of these unchanged files contributed chunks to the source
+        // collection, was NOT in targetFiles for the clone re-scan, and must
+        // still have chunks in the target collection.
+        for (const [relPath, count] of Object.entries(unchangedSurvivors)) {
+          expect(count, `unchanged file "${relPath}" must have surviving chunks`).toBeGreaterThan(0);
+        }
+
+        // The modified file's chunks must also be present (re-embedded).
+        const modifiedCount = await countChunksForPath("src/utils/math.ts");
+        expect(modifiedCount).toBeGreaterThan(0);
+      } finally {
+        for (const projectId of ["clone-preserve-source", "clone-preserve-target"]) {
+          process.env.SOCRATICODE_PROJECT_ID = projectId;
+          try {
+            await removeProjectIndex(fixture.root);
+          } catch {
+            // ignore
+          }
+        }
+        delete process.env.SOCRATICODE_PROJECT_ID;
+        fixture.cleanup();
+      }
+    },
+    300_000,
+  );
+
+  it(
     "falls through to full index when no sibling exists",
     async () => {
       const fixture = createFixtureProject("clone-no-sibling");

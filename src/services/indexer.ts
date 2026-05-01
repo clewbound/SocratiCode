@@ -673,6 +673,13 @@ interface ScanAndIndexOptions {
   progress: IndexingProgress;
   onProgress?: (message: string) => void;
   hasExistingData: boolean;
+  /** Set of files currently present + indexable in the working tree. Used by
+   *  the cleanup loop to identify chunks for files genuinely removed from
+   *  disk. Defaults to `new Set(targetFiles)` for backward compatibility with
+   *  the full-project flow where targetFiles === all indexable files.
+   *  The sibling-clone path passes the FULL set so that paths in `hashes`
+   *  (seeded with diff.unchanged) aren't misidentified as deleted. */
+  currentFileSet?: Set<string>;
 }
 
 /**
@@ -687,6 +694,12 @@ async function scanAndIndexFiles(
   opts: ScanAndIndexOptions,
 ): Promise<{ filesIndexed: number; chunksCreated: number; cancelled: boolean }> {
   const { resolvedPath, collection, hashes, targetFiles: files, progress, onProgress, hasExistingData } = opts;
+  // `currentFileSet` represents files present on disk right now. In the
+  // full-project flow this equals `targetFiles`, so the default preserves the
+  // pre-refactor behavior. In the sibling-clone flow the caller passes the
+  // FULL set of indexable files (not just modified+added) so unchanged files
+  // — whose hashes were seeded from the cloned sibling — survive cleanup.
+  const currentFileSet = opts.currentFileSet ?? new Set(files);
 
   // ── Phase 1: Scan and chunk files ──
   interface ChunkedFile {
@@ -790,6 +803,20 @@ async function scanAndIndexFiles(
   if (hasExistingData) {
     onProgress?.(`${chunkedFiles.length} files changed, ${skippedCount} unchanged/skipped`);
 
+    // Defensive guard: if the caller passes (or defaults to) an empty
+    // currentFileSet alongside non-empty hashes, the cleanup loop below would
+    // delete chunks for every previously-indexed file — catastrophic data
+    // loss. The full-project flow's default (`new Set(targetFiles)`) makes
+    // this only possible when targetFiles is empty AND hashes were seeded
+    // upstream (e.g. a future caller forgetting to pass currentFileSet on
+    // the sibling-clone path). Throw rather than silently delete.
+    if (currentFileSet.size === 0 && hashes.size > 0) {
+      throw new Error(
+        `scanAndIndexFiles: refusing to run cleanup with empty currentFileSet ` +
+        `but hashes.size=${hashes.size} (would delete every prior chunk).`,
+      );
+    }
+
     // Delete old chunks for changed files
     progress.phase = "cleaning stale chunks";
     for (const file of chunkedFiles) {
@@ -798,8 +825,9 @@ async function scanAndIndexFiles(
       }
     }
 
-    // Handle deleted files
-    const currentFileSet = new Set(files);
+    // Handle deleted files: any previously-indexed path that is NOT in the
+    // current working-tree set is stale and must be evicted from both the
+    // collection and the in-memory hash map.
     for (const [filePath] of hashes) {
       if (!currentFileSet.has(filePath)) {
         await deleteFileChunks(collection, filePath);
@@ -1209,6 +1237,12 @@ export async function indexProject(
           collection,
           hashes,
           targetFiles,
+          // Pass the FULL working-tree set so the helper's stale-cleanup
+          // loop only deletes chunks for files genuinely missing from disk.
+          // Without this the loop would walk `hashes` (seeded above with
+          // diff.unchanged) and delete every unchanged path because none of
+          // them are in the targetFiles subset.
+          currentFileSet: new Set(allFiles),
           progress,
           onProgress,
           // We just cloned points into the collection; treat as existing data
