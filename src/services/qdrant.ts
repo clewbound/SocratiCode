@@ -618,6 +618,15 @@ function metadataPointId(collName: string): string {
 /** Indexing status persisted in Qdrant metadata */
 export type IndexingStatus = "in-progress" | "completed";
 
+/** Optional extras for {@link saveProjectMetadata}. Forward-compatible bag for
+ *  fast-path indexing data that not every caller has on hand. */
+export interface SaveMetadataExtras {
+  /** Map of repo-relative path → git blob SHA-1 for the indexed snapshot.
+   *  Persisted as JSON on the metadata point so future runs can compare git
+   *  trees without re-hashing every file. */
+  gitBlobShas?: Map<string, string>;
+}
+
 /** Save project metadata and file hashes to Qdrant */
 export async function saveProjectMetadata(
   collName: string,
@@ -626,6 +635,7 @@ export async function saveProjectMetadata(
   filesIndexed: number,
   fileHashes: Map<string, string>,
   indexingStatus: IndexingStatus,
+  extras?: SaveMetadataExtras,
 ): Promise<void> {
   await ensureMetadataCollection();
   const qdrant = getClient();
@@ -636,20 +646,30 @@ export async function saveProjectMetadata(
     hashObj[k] = v;
   }
 
+  const payload: Record<string, unknown> = {
+    collectionName: collName,
+    projectPath,
+    lastIndexedAt: new Date().toISOString(),
+    filesTotal,
+    filesIndexed,
+    fileHashes: JSON.stringify(hashObj),
+    indexingStatus,
+  };
+
+  if (extras?.gitBlobShas) {
+    const blobObj: Record<string, string> = {};
+    for (const [k, v] of extras.gitBlobShas) {
+      blobObj[k] = v;
+    }
+    payload.gitBlobShas = JSON.stringify(blobObj);
+  }
+
   await qdrant.upsert(METADATA_COLLECTION, {
     points: [
       {
         id,
         vector: [0],
-        payload: {
-          collectionName: collName,
-          projectPath,
-          lastIndexedAt: new Date().toISOString(),
-          filesTotal,
-          filesIndexed,
-          fileHashes: JSON.stringify(hashObj),
-          indexingStatus,
-        },
+        payload,
       },
     ],
   });
@@ -685,6 +705,46 @@ export async function loadProjectHashes(collName: string): Promise<Map<string, s
       error: err instanceof Error ? err.message : String(err),
     });
     throw err;
+  }
+}
+
+/** Load git blob shas for a project from Qdrant.
+ *
+ * Returns null when:
+ *   - the metadata point doesn't exist
+ *   - the collection's metadata doesn't carry a `gitBlobShas` key (older
+ *     collections created before this feature shipped)
+ *   - the persisted payload is malformed (logged as a warning so the
+ *     stale entry shows up in diagnostics, but the fast-path safely
+ *     falls back to a normal scan)
+ *
+ * Network/Qdrant errors propagate so callers can distinguish "no data"
+ * from "Qdrant unreachable". */
+export async function loadProjectGitBlobShas(collName: string): Promise<Map<string, string> | null> {
+  await ensureMetadataCollection();
+  const qdrant = getClient();
+  const id = metadataPointId(collName);
+
+  const points = await qdrant.retrieve(METADATA_COLLECTION, {
+    ids: [id],
+    with_payload: true,
+  });
+
+  if (points.length === 0) return null;
+
+  const payload = points[0].payload;
+  const raw = payload?.gitBlobShas;
+  if (typeof raw !== "string") return null;
+
+  try {
+    const obj = JSON.parse(raw) as Record<string, string>;
+    return new Map(Object.entries(obj));
+  } catch (err) {
+    logger.warn("loadProjectGitBlobShas: malformed gitBlobShas payload", {
+      collName,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
   }
 }
 
