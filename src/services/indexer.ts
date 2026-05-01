@@ -1049,10 +1049,13 @@ export async function indexProject(
   }
   const hasExistingData = existingInfo !== null && existingInfo.pointsCount > 0;
 
-  // ensureCollection is idempotent — creates if absent, no-op if exists.
-  // IMPORTANT: We NEVER delete a collection here. Only removeProjectIndex
-  // (called by the codebase_remove tool) is allowed to delete collections.
-  await ensureCollection(collection);
+  // NOTE: ensureCollection(collection) is intentionally deferred to AFTER the
+  // sibling-clone gate below. The snapshot+recover clone primitive
+  // auto-creates the target collection from the source snapshot's schema —
+  // it requires the target NOT to exist. If we ensureCollection upfront we'd
+  // pre-create an empty target and recover would fail. On the normal-flow
+  // path (no sibling clone taken, or clone failed and we fell through) we
+  // call ensureCollection there.
 
   // ── Fast-path: same-collection skip ──
   // If this collection has prior metadata with gitBlobShas matching the
@@ -1266,10 +1269,21 @@ export async function indexProject(
             error: cloneErr instanceof Error ? cloneErr.message : String(cloneErr),
           },
         );
+        // Recover may have left no target collection at all OR a partial
+        // one (e.g. snapshot succeeded, recover started, then errored
+        // mid-stream). Drop whatever's there before falling through to the
+        // normal flow so ensureCollection below can recreate a clean,
+        // empty collection with the expected schema.
+        await deleteCollection(collection).catch(() => {});
         // Fall through to normal flow below.
       }
     }
   }
+
+  // Normal-flow path: no sibling-clone taken (or clone failed and we fell
+  // through). Ensure the target collection exists with the right schema
+  // before scan + embed. Idempotent — no-op if the collection already exists.
+  await ensureCollection(collection);
 
   if (hasExistingData) {
     if (hashes.size > 0) {

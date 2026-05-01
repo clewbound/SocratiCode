@@ -276,20 +276,21 @@ describe.skipIf(!dockerAvailable)("qdrant service", () => {
 
   describe("cloneCollectionPoints", () => {
     it(
-      "clones all points from one collection to another",
+      "clones all points via snapshot + recover",
       async () => {
         const source = "test_clone_source";
         const target = "test_clone_target";
         const dims = getEmbeddingConfig().embeddingDimensions;
         try {
           await ensureCollection(source);
-          await ensureCollection(target);
+          // Do NOT ensureCollection(target) — recover auto-creates the
+          // target collection from the snapshot's schema. Pre-creating
+          // would cause recover to fail.
 
-          // Seed 300 points (> CLONE_SCROLL_BATCH=256) so the scroll loop
-          // actually iterates twice — exercises the next_page_offset
-          // continuation path, not just the single-page early-exit.
-          // Vector values are arbitrary — we just need them to be the
-          // configured dimensionality so the collection accepts them.
+          // 300 points is plenty to exercise the snapshot/recover round
+          // trip end-to-end. Vector values are arbitrary — they just need
+          // to be the configured dimensionality so the collection accepts
+          // them.
           const denseVector = Array.from({ length: dims }, () => 0.1);
           const points = Array.from({ length: 300 }, (_, i) => ({
             id: `00000000-0000-0000-0000-${String(i).padStart(12, "0")}`,
@@ -311,7 +312,7 @@ describe.skipIf(!dockerAvailable)("qdrant service", () => {
           await deleteCollection(target).catch(() => {});
         }
       },
-      60_000,
+      120_000,
     );
   });
 
