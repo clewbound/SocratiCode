@@ -169,11 +169,17 @@ SocratiCode is available as a native plugin on multiple AI coding platforms. Plu
 | Platform | Install method |
 |:---------|:---------------|
 | Claude Code | `claude plugin marketplace add giancarloerra/socraticode && claude plugin install socraticode@socraticode` — [full instructions](#claude-code-plugin-recommended-for-claude-code-users) |
-| Cursor | `/add-plugin https://github.com/giancarloerra/socraticode` |
-| VS Code Copilot | Command Palette → `Chat: Install Plugin From Source` → `https://github.com/giancarloerra/socraticode` |
+| **VS Code / Cursor / VSCodium / Gitpod / code-server / Theia / Antigravity / Particle Workbench** (extension) | Search **SocratiCode** in the Extensions panel (VS Code Marketplace or Open VSX). The extension auto-registers the MCP server in Copilot agent mode, Cline, Continue and Roo Code, and adds a sidebar, interactive graph webview, and onboarding walkthrough. _Source: [`extension/`](./extension)._ |
+| Cursor | `/add-plugin https://github.com/giancarloerra/socraticode` (plugin format with skills). Also listed in the Cursor Marketplace at [cursor.com/marketplace](https://cursor.com/marketplace). |
+| VS Code Copilot | Command Palette → `Chat: Install Plugin From Source` → `https://github.com/giancarloerra/socraticode` (plugin format with skills) |
 | Zed | Add as a custom MCP server in Zed settings — [config example](#zed) |
 | Gemini CLI | `gemini extensions install https://github.com/giancarloerra/socraticode` |
 | OpenAI Codex | No public plugin directory yet — use the [MCP config](#quick-start) or see **Codex local install** below |
+
+> **Extension vs plugin (what to install in VS Code / Cursor):**
+> - The **extension** (Marketplace / Open VSX listing) is a regular VS Code-style extension. It auto-registers the MCP server in Copilot agent mode, Cline, Continue, Roo Code, plus adds a sidebar, status-bar item, interactive graph webview, walkthrough and palette commands. Best for most users.
+> - The **plugins** (`/add-plugin` for Cursor, `Chat: Install Plugin From Source` for VS Code Copilot) bundle the MCP server **plus skills + agent instructions** that teach the AI to use SocratiCode tools effectively. Best when you want the agent to be opinionated about using SocratiCode.
+> - You can install both. The extension only registers the MCP server once, so they don't conflict.
 
 > **VS Code Copilot**: The chat plugins feature is in preview. Enable it with `chat.plugins.enabled: true` in your VS Code settings.
 
