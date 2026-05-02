@@ -1,7 +1,7 @@
 {
   "name": "socraticode",
-  "version": "1.4.1",
-  "description": "Codebase intelligence — semantic search workflows, dependency graph analysis, and context artifact exploration for SocratiCode",
+  "version": "1.7.2",
+  "description": "Codebase intelligence: semantic search workflows, dependency graph analysis, and context artifact exploration for SocratiCode",
   "author": {
     "name": "Giancarlo Erra",
     "email": "giancarlo@altaire.com"
