@@ -1,0 +1,192 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 Giancarlo Erra - Altaire Limited
+
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import * as vscode from "vscode";
+import { log } from "./output.js";
+
+/**
+ * Webview panel that renders the engine's interactive graph HTML inside
+ * VS Code, so users don't have to bounce out to a browser tab.
+ *
+ * The engine's `codebase_graph_visualize` tool writes a self-contained
+ * HTML file (vendored Cytoscape + Dagre, no external scripts) to
+ * `os.tmpdir()/socraticode-graph/<projectId>.html`. We read the file
+ * directly and inject it into a webview.
+ *
+ * Why this design:
+ *
+ * - The engine already produces a usable artefact. Re-implementing a
+ *   native graph view would mean duplicating the pipeline, which we
+ *   explicitly want to avoid.
+ * - Reading from a known temp path avoids any IPC dance with the running
+ *   MCP server and works whether the user generated the graph from chat,
+ *   from the command palette, or from a CLI invocation of the engine.
+ * - A webview is sandboxed: scripts the engine writes can't reach the
+ *   workspace. The CSP we set only allows inline scripts (the vendored
+ *   Cytoscape) and webview-relative resources.
+ */
+
+const GRAPH_DIR = path.join(os.tmpdir(), "socraticode-graph");
+
+let currentPanel: vscode.WebviewPanel | undefined;
+
+export async function openInteractiveGraph(projectId?: string): Promise<void> {
+  const html = await loadGraphHtml(projectId);
+  if (!html) return;
+
+  if (currentPanel) {
+    currentPanel.webview.html = wrapHtml(html, currentPanel.webview);
+    currentPanel.reveal();
+    return;
+  }
+
+  currentPanel = vscode.window.createWebviewPanel(
+    "socraticode.graph",
+    "SocratiCode: interactive graph",
+    vscode.ViewColumn.Active,
+    {
+      enableScripts: true,
+      retainContextWhenHidden: true,
+      localResourceRoots: [vscode.Uri.file(GRAPH_DIR)],
+    },
+  );
+  currentPanel.iconPath = vscode.Uri.file(path.join(__dirname, "..", "images", "icon.png"));
+  currentPanel.onDidDispose(() => {
+    currentPanel = undefined;
+  });
+  currentPanel.webview.onDidReceiveMessage((msg: unknown) => {
+    handleWebviewMessage(msg);
+  });
+  currentPanel.webview.html = wrapHtml(html, currentPanel.webview);
+}
+
+async function loadGraphHtml(projectId?: string): Promise<string | undefined> {
+  let target: string | undefined;
+  if (projectId) {
+    target = path.join(GRAPH_DIR, `${projectId}.html`);
+  } else {
+    // Pick the most recently modified graph file.
+    try {
+      const entries = await fs.readdir(GRAPH_DIR, { withFileTypes: true });
+      let latestPath: string | undefined;
+      let latestMtime = 0;
+      for (const entry of entries) {
+        if (!entry.isFile() || !entry.name.endsWith(".html")) continue;
+        const p = path.join(GRAPH_DIR, entry.name);
+        const stat = await fs.stat(p);
+        if (stat.mtimeMs > latestMtime) {
+          latestMtime = stat.mtimeMs;
+          latestPath = p;
+        }
+      }
+      target = latestPath;
+    } catch {
+      // Directory doesn't exist; fall through to the "no graph yet" path.
+    }
+  }
+
+  if (!target) {
+    await offerToGenerate();
+    return undefined;
+  }
+
+  try {
+    return await fs.readFile(target, "utf-8");
+  } catch (err) {
+    const e = err as Error;
+    log(`Graph panel: failed to read ${target}: ${e.message}`);
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      await offerToGenerate();
+      return undefined;
+    }
+    vscode.window.showErrorMessage(`SocratiCode: ${e.message}`);
+    return undefined;
+  }
+}
+
+async function offerToGenerate(): Promise<void> {
+  const action = await vscode.window.showInformationMessage(
+    'No interactive graph has been generated yet. Ask your AI assistant to call the SocratiCode tool `codebase_graph_visualize` with `mode="interactive"`, then re-run this command.',
+    "Copy prompt to clipboard",
+    "Open chat",
+  );
+  if (action === "Copy prompt to clipboard") {
+    const prompt =
+      'Please use SocratiCode to build an interactive graph of this project: call codebase_graph_visualize with mode="interactive".';
+    await vscode.env.clipboard.writeText(prompt);
+    vscode.window.showInformationMessage("SocratiCode: prompt copied.");
+  } else if (action === "Open chat") {
+    await vscode.commands.executeCommand("workbench.action.chat.open");
+  }
+}
+
+/**
+ * Wrap the engine HTML so it works inside a webview:
+ *
+ * 1. Inject a CSP that allows inline scripts/styles (the vendored
+ *    Cytoscape) but blocks remote loads. The engine HTML is generated
+ *    locally and self-contained, so this doesn't break anything.
+ * 2. Replace any local `file://` references with `webview.asWebviewUri()`.
+ *    Today the engine inlines all its assets, so this is a defensive
+ *    no-op, but worth keeping for forward compatibility.
+ * 3. Inject a small bridge script so node-click events in the graph can
+ *    `postMessage` back to the extension and we can `vscode.commands.executeCommand`
+ *    to open files.
+ */
+function wrapHtml(html: string, webview: vscode.Webview): string {
+  const cspSource = webview.cspSource;
+  const csp = [
+    "default-src 'none'",
+    `img-src ${cspSource} data: blob:`,
+    `style-src ${cspSource} 'unsafe-inline'`,
+    `script-src ${cspSource} 'unsafe-inline'`,
+    `font-src ${cspSource} data:`,
+    "connect-src 'none'",
+  ].join("; ");
+
+  // The engine template already includes <html>...</html>. We inject the
+  // CSP meta tag right after <head>. If <head> is missing for some reason,
+  // we fall back to prepending a minimal head.
+  const cspMeta = `<meta http-equiv="Content-Security-Policy" content="${csp}">`;
+  const bridge = `
+    <script>
+      (function() {
+        const vscode = acquireVsCodeApi();
+        window.addEventListener('socraticode:openFile', (e) => {
+          vscode.postMessage({ type: 'openFile', path: e.detail?.path, line: e.detail?.line });
+        });
+      })();
+    </script>
+  `;
+
+  if (html.includes("<head>")) {
+    return html.replace("<head>", `<head>${cspMeta}${bridge}`);
+  }
+  // If the document has <html> but no <head>, splice a <head> in right
+  // after the opening <html ...> tag. Wrapping in a fresh <html>...</html>
+  // here would nest two <html> elements, which most browsers tolerate
+  // but is invalid markup.
+  if (/<html[^>]*>/i.test(html)) {
+    return html.replace(/(<html[^>]*>)/i, `$1<head>${cspMeta}${bridge}</head>`);
+  }
+  return `<!DOCTYPE html><html><head>${cspMeta}${bridge}</head><body>${html}</body></html>`;
+}
+
+function handleWebviewMessage(msg: unknown): void {
+  if (typeof msg !== "object" || msg === null) return;
+  const m = msg as { type?: string; path?: string; line?: number };
+  if (m.type === "openFile" && typeof m.path === "string") {
+    const ws = vscode.workspace.workspaceFolders?.[0];
+    if (!ws) {
+      vscode.window.showWarningMessage("SocratiCode: open a workspace to navigate from the graph.");
+      return;
+    }
+    const uri = vscode.Uri.joinPath(ws.uri, m.path);
+    const range =
+      typeof m.line === "number" ? new vscode.Range(m.line - 1, 0, m.line - 1, 0) : undefined;
+    vscode.window.showTextDocument(uri, range ? { selection: range } : {});
+  }
+}
