@@ -1,7 +1,7 @@
 {
   "name": "socraticode",
-  "version": "1.4.1",
-  "description": "Codebase intelligence — semantic search workflows, dependency graph analysis, and context artifact exploration for SocratiCode",
+  "version": "1.7.2",
+  "description": "Codebase intelligence: semantic search workflows, dependency graph analysis, and context artifact exploration for SocratiCode",
   "author": {
     "name": "Giancarlo Erra",
     "email": "giancarlo@altaire.com",
@@ -22,7 +22,7 @@
   "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "SocratiCode",
-    "shortDescription": "Codebase intelligence — semantic search, dependency graphs, and context artifacts",
+    "shortDescription": "Codebase intelligence: semantic search, dependency graphs, and context artifacts",
     "longDescription": "SocratiCode provides codebase intelligence through semantic search workflows, dependency graph analysis, and context artifact exploration. Index your codebase, search with hybrid semantic + keyword search, visualize module dependencies, and manage context artifacts.",
     "developerName": "Giancarlo Erra",
     "category": "Development",

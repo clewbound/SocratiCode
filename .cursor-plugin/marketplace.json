@@ -5,13 +5,13 @@
     "email": "giancarlo@altaire.com"
   },
   "metadata": {
-    "description": "SocratiCode — codebase intelligence plugin"
+    "description": "SocratiCode: codebase intelligence plugin"
   },
   "plugins": [
     {
       "name": "socraticode",
       "source": "./",
-      "description": "Codebase intelligence — semantic search workflows, dependency graph analysis, and context artifact exploration",
+      "description": "Codebase intelligence: semantic search workflows, dependency graph analysis, and context artifact exploration",
       "category": "development"
     }
   ]

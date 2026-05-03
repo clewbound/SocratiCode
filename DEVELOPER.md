@@ -19,6 +19,7 @@ This document covers the internals of **SocratiCode** — architecture, data flo
 - [Data Structures](#data-structures)
 - [Docker & Infrastructure](#docker--infrastructure)
 - [Extending the Indexer](#extending-the-indexer)
+- [VS Code / Open VSX Extension](#vs-code--open-vsx-extension)
 - [Troubleshooting](#troubleshooting)
 
 ---
@@ -1399,6 +1400,120 @@ See `src/services/embedding-config.ts` for all supported environment variables a
 ### Adding new ignore patterns
 
 Edit `DEFAULT_IGNORE_PATTERNS` in `src/services/ignore.ts`.
+
+---
+
+## VS Code / Open VSX Extension
+
+The repo also ships a regular VS Code extension that auto-registers the
+SocratiCode MCP server in any MCP-aware host (Copilot agent mode, Cline,
+Continue, Roo Code) and adds native UI: sidebar, status bar, interactive
+graph webview, walkthrough, and palette commands. The same `.vsix` is
+published to both VS Code Marketplace and Open VSX, so it installs in
+Cursor, VSCodium, Gitpod, code-server, Theia, Antigravity, and Particle
+Workbench in addition to stock VS Code.
+
+Source: [`extension/`](./extension)
+
+### Layout
+
+```text
+extension/
+├── package.json               # extension manifest
+├── tsconfig.json              # TS strict, ES2022, Node 18 target
+├── biome.json                 # lint config
+├── esbuild.config.mjs         # bundles src/extension.ts -> dist/extension.js
+├── README.md                  # marketplace landing page
+├── CHANGELOG.md               # extension-specific changelog
+├── images/icon.png            # marketplace icon
+├── walkthroughs/              # markdown shown in the getting-started walkthrough
+└── src/
+    ├── extension.ts           # activation entrypoint
+    ├── mcpProvider.ts         # registerMcpServerDefinitionProvider
+    ├── sidebar.ts             # TreeDataProvider for the activity-bar view
+    ├── graphPanel.ts          # webview panel for the interactive graph
+    ├── statusBar.ts           # status-bar item
+    ├── commands.ts            # command palette commands
+    ├── settings.ts            # typed config accessors
+    ├── output.ts              # log/output channel
+    └── __tests__/             # node:test smoke tests for the manifest
+```
+
+### Local development
+
+```bash
+cd extension
+npm install
+npm run watch        # rebuild dist/extension.js on save
+```
+
+To debug the extension live in a real VS Code instance:
+
+1. Open the `extension/` folder in VS Code.
+2. `F5` (Run > Start Debugging) launches a new "Extension Development Host"
+   window with the extension loaded.
+3. Open any folder in that host window. The MCP server registration kicks
+   in on activation; the sidebar appears in the Activity Bar.
+4. Output Channel: `View > Output > SocratiCode`.
+
+### Build, lint, test, package
+
+```bash
+cd extension
+
+npm run lint             # biome check
+npm run typecheck        # tsc --noEmit
+npm run compile          # esbuild bundle to dist/
+npm test                 # node:test smoke tests on the manifest
+npm run package          # produces socraticode-<version>.vsix
+```
+
+### Publishing
+
+The extension is published to two registries from the same `.vsix`:
+
+- **VS Code Marketplace** via `vsce publish` (Azure DevOps PAT)
+- **Open VSX Registry** via `ovsx publish` (Eclipse PAT)
+
+CI handles this on `v*` tags via `.github/workflows/extension-release.yml`.
+The required GitHub Actions secrets are `VSCE_PAT` (Azure DevOps personal
+access token with Marketplace Manage scope) and `OVSX_PAT` (Eclipse
+access token with Open VSX namespace). Each is set up once per
+publisher account. Maintainer notes for the full submission flow live
+outside this public repo.
+
+To publish manually:
+
+```bash
+cd extension
+npm run publish:vsce      # Microsoft marketplace
+npm run publish:ovsx      # Open VSX
+# or both at once:
+npm run publish:all
+```
+
+### Versioning
+
+The extension's version tracks the engine version. The
+`scripts/bump-plugin-versions.mjs` `release-it` hook bumps
+`extension/package.json` along with every plugin manifest, so an engine
+release `vX.Y.Z` automatically bumps the extension to `X.Y.Z`. Patch
+drift is allowed for extension-only hotfixes (e.g. release the engine
+at `1.7.2` but ship the extension at `1.7.3` for a UI bug fix).
+
+### What the extension does NOT do
+
+- It does **not** re-implement the engine. All search, dependency-graph
+  analysis, impact analysis and indexing happen in the engine via the
+  registered MCP server. The extension is a thin distribution and UI
+  shell.
+- It does **not** ship its own copy of the engine. The engine launches
+  via `npx -y socraticode` (configurable via the `socraticode.command` /
+  `socraticode.args` settings).
+- It does **not** add language-server features (code lenses, hovers,
+  diagnostics). Those would conflict with the host editor's existing
+  language servers and aren't aligned with the engine's value
+  proposition.
 
 ---
 
