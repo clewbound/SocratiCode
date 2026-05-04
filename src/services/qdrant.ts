@@ -489,6 +489,73 @@ export async function cloneCollectionPoints(source: string, target: string): Pro
   }
 }
 
+/** Drop the target if it exists, then `cloneCollectionPoints`. The clone
+ *  primitive (snapshot+recover) requires the target NOT to exist; this helper
+ *  collapses the common "drop-then-clone" pattern needed when fast-pathing a
+ *  fresh sibling clone over a possibly-stale per-branch collection (e.g.
+ *  symgraph collections that auto-exist from a previous run). Returns the
+ *  number of points cloned. */
+export async function replaceCollectionFromSibling(
+  source: string,
+  target: string,
+): Promise<number> {
+  await deleteCollection(target).catch((err) => {
+    logger.warn("replaceCollectionFromSibling: pre-clone delete failed (continuing)", {
+      target,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  });
+  return cloneCollectionPoints(source, target);
+}
+
+/** Copy the codegraph metadata point from `sourceGraphCollName` to
+ *  `targetGraphCollName`, rewriting `projectPath` and overwriting `gitBlobShas`
+ *  with caller-supplied values. The graph payload (`graphData`, node/edge
+ *  counts, lastBuiltAt) is carried over verbatim. Returns true on success,
+ *  false when the source point is missing. Throws on Qdrant errors so callers
+ *  can fall through to a fresh rebuild. */
+export async function cloneGraphMetadataPoint(
+  sourceGraphCollName: string,
+  targetGraphCollName: string,
+  opts: { projectPath: string; gitBlobShas: Map<string, string> },
+): Promise<boolean> {
+  await ensureMetadataCollection();
+  const qdrant = getClient();
+  const sourceId = metadataPointId(sourceGraphCollName);
+  const targetId = metadataPointId(targetGraphCollName);
+
+  const points = await qdrant.retrieve(METADATA_COLLECTION, {
+    ids: [sourceId],
+    with_payload: true,
+  });
+  if (points.length === 0) return false;
+  const sourcePayload = points[0].payload ?? {};
+
+  const blobObj: Record<string, string> = {};
+  for (const [k, v] of opts.gitBlobShas) {
+    blobObj[k] = v;
+  }
+
+  const payload: Record<string, unknown> = {
+    ...sourcePayload,
+    collectionName: targetGraphCollName,
+    projectPath: opts.projectPath,
+    gitBlobShas: JSON.stringify(blobObj),
+  };
+
+  await qdrant.upsert(METADATA_COLLECTION, {
+    points: [{ id: targetId, vector: [0], payload }],
+  });
+
+  logger.info("Cloned codegraph metadata point", {
+    source: sourceGraphCollName,
+    target: targetGraphCollName,
+    nodes: sourcePayload.nodeCount,
+    edges: sourcePayload.edgeCount,
+  });
+  return true;
+}
+
 /** Delete all chunks for a specific file (matched by relativePath).
  *  Uses `wait: true` so the delete is fully applied before returning — any
  *  upsert that immediately follows for the same relativePath cannot race the
@@ -1165,34 +1232,79 @@ export async function deleteProjectMetadata(collName: string): Promise<void> {
 
 // ── Code graph persistence ──────────────────────────────────────────────
 
+/** Optional extras for {@link saveGraphData}. Mirrors {@link SaveMetadataExtras}
+ *  so the codegraph metadata point can carry the same git tree snapshot as the
+ *  codebase metadata, enabling a same-tree freshness gate that skips
+ *  `rebuildGraph` when the working tree hasn't moved. */
+export interface SaveGraphDataExtras {
+  /** Map of repo-relative path → git blob SHA-1 for the tree the graph was
+   *  built from. Persisted as JSON. */
+  gitBlobShas?: Map<string, string>;
+}
+
 /** Save a code graph to Qdrant as a single metadata point */
 export async function saveGraphData(
   graphCollName: string,
   projectPath: string,
   graph: CodeGraph,
+  extras?: SaveGraphDataExtras,
 ): Promise<void> {
   await ensureMetadataCollection();
   const qdrant = getClient();
   const id = metadataPointId(graphCollName);
 
+  const payload: Record<string, unknown> = {
+    collectionName: graphCollName,
+    projectPath,
+    lastBuiltAt: new Date().toISOString(),
+    nodeCount: graph.nodes.length,
+    edgeCount: graph.edges.length,
+    graphData: JSON.stringify(graph),
+  };
+
+  if (extras?.gitBlobShas) {
+    const blobObj: Record<string, string> = {};
+    for (const [k, v] of extras.gitBlobShas) {
+      blobObj[k] = v;
+    }
+    payload.gitBlobShas = JSON.stringify(blobObj);
+  }
+
   await qdrant.upsert(METADATA_COLLECTION, {
-    points: [
-      {
-        id,
-        vector: [0],
-        payload: {
-          collectionName: graphCollName,
-          projectPath,
-          lastBuiltAt: new Date().toISOString(),
-          nodeCount: graph.nodes.length,
-          edgeCount: graph.edges.length,
-          graphData: JSON.stringify(graph),
-        },
-      },
-    ],
+    points: [{ id, vector: [0], payload }],
   });
 
   logger.info("Saved code graph", { graphCollName, projectPath, nodes: graph.nodes.length, edges: graph.edges.length });
+}
+
+/** Load the git blob shas the code graph was last built from.
+ *  Returns null when the graph metadata is missing, has no `gitBlobShas`
+ *  field (older builds), or is malformed. Network errors propagate so
+ *  callers can distinguish "no data" from "Qdrant unreachable". */
+export async function loadGraphGitBlobShas(graphCollName: string): Promise<Map<string, string> | null> {
+  await ensureMetadataCollection();
+  const qdrant = getClient();
+  const id = metadataPointId(graphCollName);
+
+  const points = await qdrant.retrieve(METADATA_COLLECTION, {
+    ids: [id],
+    with_payload: ["gitBlobShas"],
+  });
+
+  if (points.length === 0) return null;
+  const raw = points[0].payload?.gitBlobShas;
+  if (typeof raw !== "string") return null;
+
+  try {
+    const obj = JSON.parse(raw) as Record<string, string>;
+    return new Map(Object.entries(obj));
+  } catch (err) {
+    logger.warn("loadGraphGitBlobShas: malformed gitBlobShas payload", {
+      graphCollName,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
 }
 
 /** Load a code graph from Qdrant.

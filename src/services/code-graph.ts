@@ -18,7 +18,13 @@ import { computeUnresolvedPct, resolveCallSites } from "./graph-symbol-resolutio
 import { extractSymbolsAndCalls, rawCallsToUnresolvedEdges } from "./graph-symbols.js";
 import { createIgnoreFilter, shouldIgnore } from "./ignore.js";
 import { logger } from "./logger.js";
-import { deleteGraphData, getGraphMetadata, loadGraphData, saveGraphData } from "./qdrant.js";
+import {
+  deleteGraphData,
+  getGraphMetadata,
+  loadGraphData,
+  loadGraphGitBlobShas,
+  saveGraphData,
+} from "./qdrant.js";
 import {
   dropSymbolGraphCache,
   SymbolGraphCache,
@@ -142,6 +148,41 @@ export interface RebuildGraphOptions {
    * Default: `false`.
    */
   skipSymbolGraph?: boolean;
+  /**
+   * Map of repo-relative path → git blob SHA-1 for the working tree the graph
+   * is being built from. When provided, persisted on the codegraph metadata
+   * point so future runs can take the same-tree freshness fast-path via
+   * {@link isGraphFresh}.
+   */
+  gitBlobShas?: Map<string, string>;
+}
+
+/** Compare two `gitBlobShas` maps for exact equality (same keys, same values). */
+function shasEqual(a: Map<string, string>, b: Map<string, string>): boolean {
+  if (a.size !== b.size) return false;
+  for (const [k, v] of a) {
+    if (b.get(k) !== v) return false;
+  }
+  return true;
+}
+
+/** Returns true when the persisted codegraph was built from the same git
+ *  tree (`gitBlobShas`) as `currentShas`. Lets callers skip a 100s+
+ *  `rebuildGraph` whenever the working tree hasn't moved since the last
+ *  successful build (e.g. same-branch reindex, sibling-clone after Part B
+ *  copies the codegraph metadata point).
+ *
+ *  Returns `false` when no codegraph metadata exists, when the persisted
+ *  shas are missing/malformed, or when any path or sha differs. */
+export async function isGraphFresh(
+  projectPath: string,
+  currentShas: Map<string, string>,
+): Promise<boolean> {
+  const projectId = projectIdFromPath(projectPath);
+  const graphCollName = graphCollectionName(projectId);
+  const stored = await loadGraphGitBlobShas(graphCollName).catch(() => null);
+  if (stored === null) return false;
+  return shasEqual(stored, currentShas);
 }
 
 /** Force-rebuild, cache, and persist a graph.
@@ -201,7 +242,9 @@ async function doRebuildGraph(
     progress.phase = "persisting";
     const projectId = projectIdFromPath(resolvedPath);
     const graphCollName = graphCollectionName(projectId);
-    await saveGraphData(graphCollName, resolvedPath, graph);
+    await saveGraphData(graphCollName, resolvedPath, graph, {
+      gitBlobShas: opts.gitBlobShas,
+    });
 
     // Build & persist symbol graph (resolution + sharded persistence) — unless
     // the caller asked to skip it (Phase F watcher path).
