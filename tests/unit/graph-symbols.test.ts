@@ -149,6 +149,41 @@ public class Foo {
       expect(names).toContain("baz");
     });
 
+    it("prefers the declared Java class name over parameter types in Spring Boot entrypoints", () => {
+      const src = `
+@SpringBootApplication
+public class WorkflowFlowableApplication {
+    public static void main(String[] args) {
+        SpringApplication.run(WorkflowFlowableApplication.class, args);
+    }
+}
+`;
+      const out = extractSymbolsAndCalls(src, "java" as unknown as Lang, ".java", "WorkflowFlowableApplication.java");
+      const names = out.symbols.map((s) => s.name);
+      expect(names).toContain("WorkflowFlowableApplication");
+      expect(names).not.toContain("String");
+      expect(names).toContain("main");
+    });
+
+    it("does not treat Java test annotations as method names", () => {
+      const src = `
+class SecurityAuthClientRequireSubjectTest {
+    @AfterEach
+    void cleanup() {}
+
+    @Test
+    void requireSubjectThrows() {}
+}
+`;
+      const out = extractSymbolsAndCalls(src, "java" as unknown as Lang, ".java", "SecurityAuthClientRequireSubjectTest.java");
+      const names = out.symbols.map((s) => s.name);
+      expect(names).toContain("SecurityAuthClientRequireSubjectTest");
+      expect(names).toContain("cleanup");
+      expect(names).toContain("requireSubjectThrows");
+      expect(names).not.toContain("AfterEach");
+      expect(names).not.toContain("Test");
+    });
+
     it("extracts Kotlin top-level fun and class methods", () => {
       const src = `
 fun greet(name: String): String = "Hi"
