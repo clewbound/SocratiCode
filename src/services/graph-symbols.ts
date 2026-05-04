@@ -532,7 +532,9 @@ function extractFromJvm(
 function stripJvmAnnotations(text: string): string {
   return text
     .split("\n")
-    .filter((line) => !line.trim().startsWith("@"))
+    .map((line) =>
+      line.replace(/^\s*(?:@(?:[\w$]+:)?[\w$.]+(?:\([^)]*\))?\s*)+/, "")
+    )
     .join("\n");
 }
 
@@ -551,6 +553,10 @@ function extractJvmCallableName(text: string): string | null {
     .split("{", 1)[0]
     .split("=", 1)[0]
     .trim();
+  const scalaDefMatches = Array.from(signature.matchAll(/\bdef\s+([A-Za-z_$][\w$]*)\b/g));
+  if (scalaDefMatches.length > 0) {
+    return scalaDefMatches[scalaDefMatches.length - 1][1];
+  }
   const matches = Array.from(signature.matchAll(/([A-Za-z_$][\w$]*)\s*\(/g));
   return matches.length > 0 ? matches[matches.length - 1][1] : null;
 }

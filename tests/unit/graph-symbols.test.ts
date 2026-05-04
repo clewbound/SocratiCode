@@ -184,6 +184,19 @@ class SecurityAuthClientRequireSubjectTest {
       expect(names).not.toContain("Test");
     });
 
+    it("preserves Java declarations when annotations share the same line", () => {
+      const src = `
+class InlineAnnotationTest {
+    @Test void cleanup() {}
+}
+`;
+      const out = extractSymbolsAndCalls(src, "java" as unknown as Lang, ".java", "InlineAnnotationTest.java");
+      const names = out.symbols.map((s) => s.name);
+      expect(names).toContain("InlineAnnotationTest");
+      expect(names).toContain("cleanup");
+      expect(names).not.toContain("Test");
+    });
+
     it("extracts Kotlin top-level fun and class methods", () => {
       const src = `
 fun greet(name: String): String = "Hi"
@@ -203,6 +216,8 @@ class Bar {
       const src = `
 class Foo {
   def bar(): Int = 1
+  def size: Int = 1
+  def now = Instant.now()
 }
 
 object Main {
@@ -212,6 +227,8 @@ object Main {
       const out = extractSymbolsAndCalls(src, "scala" as unknown as Lang, ".scala", "Main.scala");
       const names = out.symbols.map((s) => s.name);
       expect(names).toContain("bar");
+      expect(names).toContain("size");
+      expect(names).toContain("now");
       expect(names).toContain("main");
     });
   });
