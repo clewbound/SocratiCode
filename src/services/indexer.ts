@@ -1299,6 +1299,7 @@ export async function indexProject(
           diff.modified.length === 0 &&
           diff.added.length === 0 &&
           diff.deleted.length === 0;
+        let codegraphCloned = false;
         if (isZeroDiff) {
           const siblingProjectId = sibling.collectionName.replace(
             /^codebase_/,
@@ -1326,6 +1327,7 @@ export async function indexProject(
             if (copied) {
               invalidateGraphCache(resolvedPath);
               dropSymbolGraphCache(projectId);
+              codegraphCloned = true;
               onProgress?.(`Cloned code graph from sibling.`);
             }
           } catch (graphCloneErr) {
@@ -1344,13 +1346,19 @@ export async function indexProject(
         }
 
         progress.phase = "building code graph";
-        const graphFresh = await isGraphFresh(
-          resolvedPath,
-          currentGitBlobShas,
-        ).catch(() => false);
+        // Trust a successful clone over a follow-up freshness read: the clone
+        // wrote `currentGitBlobShas` directly, so by definition the graph is
+        // fresh. Skipping the read-back avoids a race where the upsert is
+        // queued but not yet visible to the immediate retrieve.
+        const graphFresh =
+          codegraphCloned ||
+          (await isGraphFresh(resolvedPath, currentGitBlobShas).catch(() => false));
         if (graphFresh) {
           onProgress?.(`Code graph fresh — skipping rebuild.`);
-          logger.info("Code graph fresh, skipping rebuild", { resolvedPath });
+          logger.info("Code graph fresh, skipping rebuild", {
+            resolvedPath,
+            cloned: codegraphCloned,
+          });
         } else {
           try {
             const graph = await rebuildGraph(resolvedPath, {

@@ -311,20 +311,41 @@ type CollectionInfoResponse = Awaited<ReturnType<QdrantClient["getCollection"]>>
 async function probeWriteReadiness(target: string, sourceInfo: CollectionInfoResponse): Promise<void> {
   const qdrant = getClient();
   const vectorsConfig = sourceInfo.config?.params?.vectors;
-  // VectorsConfig is a union of single-vector params and a dictionary; the
-  // recovered collection here always has a named "dense" entry (we created
-  // the source via `ensureCollection` which only emits the dictionary form).
-  const denseConfig = (vectorsConfig as Record<string, { size?: number } | undefined> | undefined)?.dense;
-  const denseDim = denseConfig?.size;
-  if (typeof denseDim !== "number") {
-    throw new Error(`probeWriteReadiness: source dense vector dim missing (target=${target})`);
+
+  // Two collection shapes flow through clone:
+  //   1. **Codebase chunks** — named `dense` (size N) + sparse `bm25`.
+  //   2. **Symgraph dummies** — single unnamed `{ size: 1, distance: ... }`,
+  //      no sparse vectors. Used as KV stores keyed by point id.
+  // The probe vector must match the source's schema or the upsert fails.
+  type ProbeVector = number[] | { dense: number[]; bm25: { indices: number[]; values: number[] } };
+  let probeVector: ProbeVector;
+  if (
+    vectorsConfig != null &&
+    typeof vectorsConfig === "object" &&
+    "size" in vectorsConfig &&
+    typeof (vectorsConfig as { size?: unknown }).size === "number"
+  ) {
+    // Single unnamed vector (symgraph-shape).
+    const dim = (vectorsConfig as { size: number }).size;
+    probeVector = new Array<number>(dim).fill(0);
+  } else {
+    // Named-vector dictionary; require a `dense` entry. `bm25` is sparse-only,
+    // raw `{indices,values}` bypasses server-side BM25 inference warm-up.
+    const denseConfig = (vectorsConfig as Record<string, { size?: number } | undefined> | undefined)?.dense;
+    const denseDim = denseConfig?.size;
+    if (typeof denseDim !== "number") {
+      throw new Error(`probeWriteReadiness: source dense vector dim missing (target=${target})`);
+    }
+    probeVector = {
+      dense: new Array<number>(denseDim).fill(0),
+      bm25: { indices: [0], values: [0] },
+    };
   }
 
   // Sentinel ID is randomized per call so concurrent probes don't collide.
   // The all-zero leading bytes keep it visually distinct from sha256-derived
   // chunk IDs — easy to recognize in logs/inspection.
   const probeId = `00000000-0000-0000-0000-${Math.floor(Math.random() * 0xffffffffffff).toString(16).padStart(12, "0")}`;
-  const denseVector = new Array<number>(denseDim).fill(0);
 
   const deadline = Date.now() + PROBE_TIMEOUT_MS;
   let lastErr: unknown = null;
@@ -336,13 +357,7 @@ async function probeWriteReadiness(target: string, sourceInfo: CollectionInfoRes
         points: [
           {
             id: probeId,
-            vector: {
-              dense: denseVector,
-              // Raw sparse {indices, values} bypasses Qdrant's server-side
-              // BM25 inference engine, which has its own warm-up cost. We
-              // just need to prove the write path accepts a point.
-              bm25: { indices: [0], values: [0] },
-            },
+            vector: probeVector,
             payload: { _socraticode_probe: true },
           },
         ],

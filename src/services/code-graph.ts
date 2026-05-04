@@ -157,13 +157,35 @@ export interface RebuildGraphOptions {
   gitBlobShas?: Map<string, string>;
 }
 
-/** Compare two `gitBlobShas` maps for exact equality (same keys, same values). */
+/** Compare two `gitBlobShas` maps for exact equality (same keys, same values).
+ *  When they differ, logs a sample of the divergence so callers can diagnose
+ *  freshness-gate misses without re-running with extra instrumentation. */
 function shasEqual(a: Map<string, string>, b: Map<string, string>): boolean {
-  if (a.size !== b.size) return false;
-  for (const [k, v] of a) {
-    if (b.get(k) !== v) return false;
+  if (a.size !== b.size) {
+    logger.info("isGraphFresh: size mismatch", { stored: a.size, current: b.size });
+    return false;
   }
-  return true;
+  let mismatches = 0;
+  let missingInB = 0;
+  const sampleStoredOnly: string[] = [];
+  for (const [k, v] of a) {
+    const bv = b.get(k);
+    if (bv === undefined) {
+      missingInB++;
+      if (sampleStoredOnly.length < 3) sampleStoredOnly.push(k);
+    } else if (bv !== v) {
+      mismatches++;
+    }
+  }
+  if (mismatches === 0 && missingInB === 0) return true;
+  logger.info("isGraphFresh: content mismatch", {
+    storedSize: a.size,
+    currentSize: b.size,
+    valueMismatches: mismatches,
+    keysMissingInCurrent: missingInB,
+    sampleStoredOnly,
+  });
+  return false;
 }
 
 /** Returns true when the persisted codegraph was built from the same git
@@ -180,8 +202,17 @@ export async function isGraphFresh(
 ): Promise<boolean> {
   const projectId = projectIdFromPath(projectPath);
   const graphCollName = graphCollectionName(projectId);
-  const stored = await loadGraphGitBlobShas(graphCollName).catch(() => null);
-  if (stored === null) return false;
+  const stored = await loadGraphGitBlobShas(graphCollName).catch((err) => {
+    logger.warn("isGraphFresh: loadGraphGitBlobShas threw", {
+      graphCollName,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  });
+  if (stored === null) {
+    logger.info("isGraphFresh: no stored gitBlobShas (cold codegraph)", { graphCollName });
+    return false;
+  }
   return shasEqual(stored, currentShas);
 }
 
