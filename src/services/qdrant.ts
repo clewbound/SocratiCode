@@ -543,7 +543,11 @@ export async function cloneGraphMetadataPoint(
     gitBlobShas: JSON.stringify(blobObj),
   };
 
+  // wait:true so a follow-up `isGraphFresh` / `loadGraphGitBlobShas` read in
+  // the same indexer pass sees the cloned shas. Without it, the upsert
+  // returns as soon as the request is queued and the read can race the WAL.
   await qdrant.upsert(METADATA_COLLECTION, {
+    wait: true,
     points: [{ id: targetId, vector: [0], payload }],
   });
 
