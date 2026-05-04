@@ -82,7 +82,7 @@ export function projectIdFromPath(folderPath: string): string {
  * Used internally by resolveLinkedCollections so linked projects always
  * resolve to their base collection regardless of SOCRATICODE_BRANCH_AWARE.
  */
-function coreProjectId(folderPath: string): string {
+export function coreProjectId(folderPath: string): string {
   const normalized = path.resolve(folderPath);
   return createHash("sha256").update(normalized).digest("hex").slice(0, 12);
 }

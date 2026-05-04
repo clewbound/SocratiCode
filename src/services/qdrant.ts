@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Giancarlo Erra - Altaire Limited
 import { createHash } from "node:crypto";
 import { QdrantClient } from "@qdrant/js-client-rest";
+import { coreProjectId } from "../config.js";
 import { QDRANT_API_KEY, QDRANT_HOST, QDRANT_PORT, QDRANT_URL, resolveQdrantPort } from "../constants.js";
 import type { ArtifactIndexState, CodeGraph, FileChunk, SearchResult } from "../types.js";
 import { getEmbeddingConfig } from "./embedding-config.js";
@@ -1004,17 +1005,27 @@ export interface SiblingMetadata {
   matchCount: number;
 }
 
-/** Find the sibling collection (different collection name, same projectPath)
- *  whose stored gitBlobShas overlap most with the supplied `currentBlobShas`.
- *  `excludeCollection` lets the caller skip the in-progress target so it isn't
- *  considered as its own sibling.
+/** Find the sibling codebase collection whose stored gitBlobShas overlap most
+ *  with the supplied `currentBlobShas`. `excludeCollection` lets the caller
+ *  skip the in-progress target so it isn't considered as its own sibling.
  *
- *  Implementation: scrolls METADATA_COLLECTION with a payload filter on
- *  projectPath, materializes candidates client-side (project metadata is
- *  dozens of points per host, not millions — scanning is fine), and returns
- *  the best match plus its file/blob hash maps. Returns null when no
- *  candidate exists for the projectPath, when every candidate is excluded,
- *  or when no candidate has any overlap with `currentBlobShas`. */
+ *  Implementation: candidate discovery uses Qdrant's collection-list API
+ *  (cheap, in-memory registry — milliseconds regardless of payload size).
+ *  Candidates are codebase collections that share the project's
+ *  path-derived `coreProjectId` hash; this includes branch-aware suffixed
+ *  variants (`codebase_<hash>__<branch>`) plus the bare branch-unaware
+ *  collection. Each candidate's metadata point is then fetched by
+ *  deterministic id (`metadataPointId(collName)`) in a single batch retrieve.
+ *
+ *  The previous implementation scrolled METADATA_COLLECTION with a filter on
+ *  `projectPath`. That collection has `on_disk_payload: true`, so filter
+ *  evaluation forced Qdrant to disk-read every matching point's full payload
+ *  (including multi-megabyte `gitBlobShas` and `graphData` JSON blobs) just
+ *  to project the requested fields. On the self-hosted 1-vCPU instance this
+ *  cost ~30s for ~17 matching points and would scale linearly with the
+ *  number of indexed branches per project. The new approach reads zero
+ *  payloads during discovery and only pays the disk-read cost for the
+ *  small set of actual codebase candidates. */
 export async function findSiblingMetadata(
   projectPath: string,
   currentBlobShas: Map<string, string>,
@@ -1023,58 +1034,75 @@ export async function findSiblingMetadata(
   await ensureMetadataCollection();
   const qdrant = getClient();
 
+  // Discover candidate sibling collections via the collection registry.
+  // Codebase collections for this project all share the path-derived
+  // `coreProjectId` hash; branch-aware variants append `__<branch>`.
+  const coreId = coreProjectId(projectPath);
+  const baseName = `codebase_${coreId}`;
+  const branchPrefix = `${baseName}__`;
+
+  const { collections } = await qdrant.getCollections();
+  const candidateCollNames = collections
+    .map((c) => c.name)
+    .filter(
+      (name) =>
+        (name === baseName || name.startsWith(branchPrefix)) &&
+        name !== excludeCollection,
+    );
+
+  if (candidateCollNames.length === 0) {
+    return null;
+  }
+
+  // Batch retrieve metadata points for all candidates in a single call. Point
+  // ids are deterministic from collection names so we can build the id list
+  // up-front; remap returned points back to their source collName via id.
+  const idToColl = new Map<string, string>();
+  for (const collName of candidateCollNames) {
+    idToColl.set(metadataPointId(collName), collName);
+  }
+  const ids = Array.from(idToColl.keys());
+
+  const points = await qdrant.retrieve(METADATA_COLLECTION, {
+    ids,
+    with_payload: ["gitBlobShas", "fileHashes"],
+  });
+
   let bestMatch = -1;
   let best: SiblingMetadata | null = null;
-  let offset: string | number | Record<string, unknown> | undefined;
 
-  while (true) {
-    const page = await qdrant.scroll(METADATA_COLLECTION, {
-      limit: 256,
-      offset,
-      with_payload: true,
-      with_vector: false,
-      filter: {
-        must: [{ key: "projectPath", match: { value: projectPath } }],
-      },
-    });
+  for (const point of points) {
+    const collName = idToColl.get(String(point.id));
+    if (collName === undefined) continue;
+    const payload = point.payload;
 
-    for (const point of page.points) {
-      const payload = point.payload;
-      const collName = payload?.collectionName;
-      if (typeof collName !== "string") continue;
-      if (excludeCollection !== undefined && collName === excludeCollection) continue;
-
-      const blobsRaw = payload?.gitBlobShas;
-      if (typeof blobsRaw !== "string") continue;
-      let blobs: Map<string, string>;
-      try {
-        blobs = new Map(Object.entries(JSON.parse(blobsRaw) as Record<string, string>));
-      } catch {
-        continue;
-      }
-
-      let matchCount = 0;
-      for (const [path, sha] of currentBlobShas) {
-        if (blobs.get(path) === sha) matchCount++;
-      }
-
-      if (matchCount > bestMatch) {
-        const hashesRaw = payload?.fileHashes;
-        let fileHashes = new Map<string, string>();
-        if (typeof hashesRaw === "string") {
-          try {
-            fileHashes = new Map(Object.entries(JSON.parse(hashesRaw) as Record<string, string>));
-          } catch {
-            continue;
-          }
-        }
-        bestMatch = matchCount;
-        best = { collectionName: collName, fileHashes, gitBlobShas: blobs, matchCount };
-      }
+    const blobsRaw = payload?.gitBlobShas;
+    if (typeof blobsRaw !== "string") continue;
+    let blobs: Map<string, string>;
+    try {
+      blobs = new Map(Object.entries(JSON.parse(blobsRaw) as Record<string, string>));
+    } catch {
+      continue;
     }
 
-    if (page.next_page_offset == null) break;
-    offset = page.next_page_offset as string | number | Record<string, unknown>;
+    let matchCount = 0;
+    for (const [path, sha] of currentBlobShas) {
+      if (blobs.get(path) === sha) matchCount++;
+    }
+
+    if (matchCount > bestMatch) {
+      const hashesRaw = payload?.fileHashes;
+      let fileHashes = new Map<string, string>();
+      if (typeof hashesRaw === "string") {
+        try {
+          fileHashes = new Map(Object.entries(JSON.parse(hashesRaw) as Record<string, string>));
+        } catch {
+          continue;
+        }
+      }
+      bestMatch = matchCount;
+      best = { collectionName: collName, fileHashes, gitBlobShas: blobs, matchCount };
+    }
   }
 
   return bestMatch > 0 ? best : null;

@@ -1189,8 +1189,10 @@ export async function indexProject(
       currentGitBlobShas,
       collection,
     ).catch((err) => {
-      logger.warn("findSiblingMetadata failed (treating as no sibling)", {
+      logger.error("findSiblingMetadata threw", {
         error: err instanceof Error ? err.message : String(err),
+        name: err instanceof Error ? err.name : undefined,
+        stack: err instanceof Error ? err.stack : undefined,
       });
       return null;
     });

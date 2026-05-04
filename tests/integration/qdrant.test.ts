@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 Giancarlo Erra - Altaire Limited
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { coreProjectId } from "../../src/config.js";
 import { ensureQdrantReady } from "../../src/services/docker.js";
 import { getEmbeddingConfig } from "../../src/services/embedding-config.js";
 import { ensureOllamaReady } from "../../src/services/ollama.js";
@@ -371,12 +372,24 @@ describe.skipIf(!dockerAvailable)("qdrant service", () => {
     it(
       "returns the most-overlapping sibling for a project path",
       async () => {
-        const projA = "project-a-1";
-        const projA2 = "project-a-2";
-        const projB = "project-b-1";
+        // Sibling discovery uses the Qdrant collection registry: candidates
+        // are codebase collections sharing the project's path-derived
+        // `coreProjectId`. Stand up real (empty) collections under that
+        // hash so the test exercises the actual production path.
         const fakePath = "/tmp/findsibling-fixture";
+        const otherPath = "/tmp/findsibling-fixture-other";
+        const coreId = coreProjectId(fakePath);
+        const otherCoreId = coreProjectId(otherPath);
+        const projA = `codebase_${coreId}__branch-a`;
+        const projA2 = `codebase_${coreId}__branch-b`;
+        const projB = `codebase_${otherCoreId}__branch-c`;
 
         await ensureMetadataCollection();
+        // Create empty 1-d vector collections (cheap; same shape as cache uses).
+        for (const c of [projA, projA2, projB]) {
+          await ensureCollection(c, 1);
+        }
+
         await saveProjectMetadata(
           projA,
           fakePath,
@@ -402,7 +415,7 @@ describe.skipIf(!dockerAvailable)("qdrant service", () => {
         );
         await saveProjectMetadata(
           projB,
-          "/tmp/different-project",
+          otherPath,
           1,
           1,
           new Map([["x.ts", "h2"]]),
@@ -421,13 +434,14 @@ describe.skipIf(!dockerAvailable)("qdrant service", () => {
             ["b.ts", "11".repeat(20)],
           ]);
           const result = await findSiblingMetadata(fakePath, target, projA);
-          // projA was excluded — projA2 has 1 overlap, projB excluded by projectPath
+          // projA excluded — projA2 has 1 overlap, projB filtered out by hash
+          // prefix (different coreProjectId).
           expect(result).not.toBeNull();
           if (result == null) throw new Error("result was null");
           expect(result.collectionName).toBe(projA2);
           expect(result.matchCount).toBe(1);
 
-          // Now query without exclusion: projA wins outright
+          // Now query without exclusion: projA wins outright (2 overlaps).
           const without = await findSiblingMetadata(fakePath, target);
           expect(without).not.toBeNull();
           if (without == null) throw new Error("without was null");
@@ -439,6 +453,7 @@ describe.skipIf(!dockerAvailable)("qdrant service", () => {
             await qdrant
               .delete(METADATA_COLLECTION, { points: [metadataPointId(c)] })
               .catch(() => {});
+            await deleteCollection(c).catch(() => {});
           }
         }
       },
