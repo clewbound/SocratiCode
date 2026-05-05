@@ -1542,11 +1542,58 @@ export async function indexProject(
     hashes.clear();
   }
 
-  // ── Phase 1: Scan and chunk files ──
+  // ── Phase 1: Scan + embed AND build code graph (concurrently — Phase 4-G) ──
+  // The two pipelines touch disjoint state: scanAndIndexFiles upserts to
+  // codebase_<id>, while rebuildGraph reads source files from disk and
+  // writes codegraph_<id> + symgraph_*. Running them in parallel saves
+  // wall-time on cold/non-sibling indexes (where both are non-trivial).
+  //
+  // Cancellation note: rebuildGraph has no abort-signal plumbing today, so a
+  // mid-scan cancel will still wait for the in-flight graph build to settle
+  // before returning. We accept this — the graph build is bounded and the
+  // user gets a valid graph even on a cancelled scan.
   progress.phase = "scanning files";
   const files = await getIndexableFiles(resolvedPath, extraExtensions);
   progress.filesTotal = files.length;
   onProgress?.(`Found ${files.length} indexable files`);
+
+  // Compute graph freshness up-front (cheap; one Qdrant retrieve) so the
+  // graph promise is a no-op when the working tree hasn't moved.
+  const cgFresh =
+    currentGitBlobShas !== null
+      ? await isGraphFresh(resolvedPath, currentGitBlobShas).catch(() => false)
+      : false;
+
+  // Kick off the graph build. The IIFE shape ensures the promise is
+  // scheduled NOW (before we await scan), so the two pipelines actually
+  // run concurrently rather than serializing on the await order.
+  const graphPromise: Promise<void> = cgFresh
+    ? (async () => {
+        onProgress?.(`Code graph fresh — skipping rebuild.`);
+        logger.info("Code graph fresh, skipping rebuild", { resolvedPath });
+      })()
+    : (async () => {
+        onProgress?.("Building code dependency graph...");
+        try {
+          const graph = await rebuildGraph(
+            resolvedPath,
+            currentGitBlobShas !== null
+              ? { gitBlobShas: currentGitBlobShas }
+              : undefined,
+          );
+          onProgress?.(
+            `Code graph built: ${graph.nodes.length} files, ${graph.edges.length} edges`,
+          );
+        } catch (graphErr) {
+          const graphMsg =
+            graphErr instanceof Error ? graphErr.message : String(graphErr);
+          logger.warn("Code graph build failed (non-fatal)", {
+            projectPath: resolvedPath,
+            error: graphMsg,
+          });
+          onProgress?.(`Code graph build failed (non-fatal): ${graphMsg}`);
+        }
+      })();
 
   const scanResult = await scanAndIndexFiles({
     resolvedPath,
@@ -1559,13 +1606,18 @@ export async function indexProject(
   });
 
   if (scanResult.cancelled) {
+    // Wait for the dangling graph promise so we don't leak it past the
+    // function return. graphPromise never rejects (errors are caught
+    // inside the IIFE), so this await is safe.
+    await graphPromise;
     return scanResult;
   }
 
   const filesIndexed = scanResult.filesIndexed;
   const chunksCreated = scanResult.chunksCreated;
 
-  // Final metadata save
+  // Final metadata save (depends on scanResult; can run in parallel with
+  // the tail of the graph build).
   progress.phase = "saving metadata";
   await saveProjectMetadata(
     collection,
@@ -1577,29 +1629,10 @@ export async function indexProject(
     currentGitBlobShas != null ? { gitBlobShas: currentGitBlobShas } : undefined,
   );
 
-  // Auto-build code graph
+  // Surface the graph phase to status consumers if the build is still
+  // in-flight, then await it.
   progress.phase = "building code graph";
-  onProgress?.("Building code dependency graph...");
-  const cgFresh =
-    currentGitBlobShas !== null
-      ? await isGraphFresh(resolvedPath, currentGitBlobShas).catch(() => false)
-      : false;
-  if (cgFresh) {
-    onProgress?.(`Code graph fresh — skipping rebuild.`);
-    logger.info("Code graph fresh, skipping rebuild", { resolvedPath });
-  } else {
-    try {
-      const graph = await rebuildGraph(
-        resolvedPath,
-        currentGitBlobShas !== null ? { gitBlobShas: currentGitBlobShas } : undefined,
-      );
-      onProgress?.(`Code graph built: ${graph.nodes.length} files, ${graph.edges.length} edges`);
-    } catch (graphErr) {
-      const graphMsg = graphErr instanceof Error ? graphErr.message : String(graphErr);
-      logger.warn("Code graph build failed (non-fatal)", { projectPath: resolvedPath, error: graphMsg });
-      onProgress?.(`Code graph build failed (non-fatal): ${graphMsg}`);
-    }
-  }
+  await graphPromise;
 
   // Auto-index context artifacts if .socraticodecontextartifacts.json exists
   try {
