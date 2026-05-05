@@ -2,7 +2,12 @@
 // Copyright (C) 2026 Giancarlo Erra - Altaire Limited
 import { createHash } from "node:crypto";
 import { QdrantClient } from "@qdrant/js-client-rest";
-import { coreProjectId } from "../config.js";
+import {
+  coreProjectId,
+  symgraphFileCollectionName,
+  symgraphIndexCollectionName,
+  symgraphMetaCollectionName,
+} from "../config.js";
 import { QDRANT_API_KEY, QDRANT_HOST, QDRANT_PORT, QDRANT_URL, resolveQdrantPort } from "../constants.js";
 import type { ArtifactIndexState, CodeGraph, FileChunk, SearchResult } from "../types.js";
 import { getEmbeddingConfig } from "./embedding-config.js";
@@ -1089,6 +1094,13 @@ export interface SiblingMetadata {
   fileHashes: Map<string, string>;
   gitBlobShas: Map<string, string>;
   matchCount: number;
+  /** True when the sibling has all the auxiliary state needed to fully
+   *  short-circuit graph rebuild on a zero-diff clone: a codegraph metadata
+   *  point and all three symgraph collections (`_symgraph_meta`,
+   *  `_symgraph_file`, `_symgraph_index`). When false, callers should fall
+   *  back to `rebuildGraph` after the codebase clone — partial sibling state
+   *  can come from older or interrupted indexes. */
+  hasCompleteGraphState: boolean;
 }
 
 /** Find the sibling codebase collection whose stored gitBlobShas overlap most
@@ -1128,6 +1140,7 @@ export async function findSiblingMetadata(
   const branchPrefix = `${baseName}__`;
 
   const { collections } = await qdrant.getCollections();
+  const allCollNames = new Set(collections.map((c) => c.name));
   const candidateCollNames = collections
     .map((c) => c.name)
     .filter(
@@ -1154,8 +1167,20 @@ export async function findSiblingMetadata(
     with_payload: ["gitBlobShas", "fileHashes"],
   });
 
-  let bestMatch = -1;
-  let best: SiblingMetadata | null = null;
+  // Collect all viable candidates, then pick the best by (matchCount,
+  // hasCompleteGraphState) lexicographically. Tie-breaking on graph state
+  // avoids picking a sibling whose `_symgraph_meta` etc. were never persisted
+  // (older or interrupted indexes), which would force a `rebuildGraph`
+  // fallback even when another candidate has identical blob overlap and
+  // complete state.
+  interface ScoredCandidate {
+    collectionName: string;
+    fileHashes: Map<string, string>;
+    gitBlobShas: Map<string, string>;
+    matchCount: number;
+    hasCompleteGraphState: boolean;
+  }
+  const scored: ScoredCandidate[] = [];
 
   for (const point of points) {
     const collName = idToColl.get(String(point.id));
@@ -1175,23 +1200,50 @@ export async function findSiblingMetadata(
     for (const [path, sha] of currentBlobShas) {
       if (blobs.get(path) === sha) matchCount++;
     }
+    if (matchCount === 0) continue;
 
-    if (matchCount > bestMatch) {
-      const hashesRaw = payload?.fileHashes;
-      let fileHashes = new Map<string, string>();
-      if (typeof hashesRaw === "string") {
-        try {
-          fileHashes = new Map(Object.entries(JSON.parse(hashesRaw) as Record<string, string>));
-        } catch {
-          continue;
-        }
+    const hashesRaw = payload?.fileHashes;
+    let fileHashes = new Map<string, string>();
+    if (typeof hashesRaw === "string") {
+      try {
+        fileHashes = new Map(Object.entries(JSON.parse(hashesRaw) as Record<string, string>));
+      } catch {
+        continue;
       }
-      bestMatch = matchCount;
-      best = { collectionName: collName, fileHashes, gitBlobShas: blobs, matchCount };
     }
+
+    // Graph state is "complete" when all three symgraph collections exist
+    // alongside the codebase collection. The three symgraphs are written
+    // together with the codegraph metadata point in `doRebuildGraph`, so
+    // checking the cheap collection-list flags is sufficient — no extra
+    // METADATA_COLLECTION round-trip needed.
+    const projectId = collName.replace(/^codebase_/, "");
+    const hasCompleteGraphState =
+      allCollNames.has(symgraphMetaCollectionName(projectId)) &&
+      allCollNames.has(symgraphFileCollectionName(projectId)) &&
+      allCollNames.has(symgraphIndexCollectionName(projectId));
+
+    scored.push({
+      collectionName: collName,
+      fileHashes,
+      gitBlobShas: blobs,
+      matchCount,
+      hasCompleteGraphState,
+    });
   }
 
-  return bestMatch > 0 ? best : null;
+  if (scored.length === 0) return null;
+
+  scored.sort((a, b) => {
+    if (b.matchCount !== a.matchCount) return b.matchCount - a.matchCount;
+    // Same blob overlap → prefer complete graph state.
+    if (a.hasCompleteGraphState !== b.hasCompleteGraphState) {
+      return a.hasCompleteGraphState ? -1 : 1;
+    }
+    return 0;
+  });
+
+  return scored[0];
 }
 
 /** Get project metadata (for list display).

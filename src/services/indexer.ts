@@ -1300,7 +1300,7 @@ export async function indexProject(
           diff.added.length === 0 &&
           diff.deleted.length === 0;
         let codegraphCloned = false;
-        if (isZeroDiff) {
+        if (isZeroDiff && sibling.hasCompleteGraphState) {
           const siblingProjectId = sibling.collectionName.replace(
             /^codebase_/,
             "",
