@@ -196,12 +196,17 @@ export async function updateChangedFilesSymbolGraph(
   }
 
   // ── Persist dirty shards ──────────────────────────────────────────────
+  // Shard counts are bounded (≤27 name + ≤256 reverse) and each upsert is an
+  // independent Qdrant RPC, so fire them in parallel rather than serially.
+  const nameShardSaves: Promise<void>[] = [];
   for (const [key, shard] of dirtyNameShards.entries()) {
-    await saveNameShard(projectId, key, shard);
+    nameShardSaves.push(saveNameShard(projectId, key, shard));
   }
+  const reverseShardSaves: Promise<void>[] = [];
   for (const [bucket, shard] of dirtyReverseShards.entries()) {
-    await saveReverseShard(projectId, bucket, shard);
+    reverseShardSaves.push(saveReverseShard(projectId, bucket, shard));
   }
+  await Promise.all([...nameShardSaves, ...reverseShardSaves]);
 
   // ── Update meta with running counts ──────────────────────────────────
   const newMeta: SymbolGraphMeta = {

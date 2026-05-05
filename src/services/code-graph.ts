@@ -325,16 +325,22 @@ async function persistSymbolGraph(
     }
   }
 
-  // Persist
+  // Persist. Shards are small in count (≤27 name + ≤256 reverse) and each
+  // upsert is an independent Qdrant RPC, so fire them in parallel —
+  // serialising them gave up several seconds of wall time on large repos.
   await saveFilePayloads(projectId, payloads);
+
+  const nameShardSaves: Promise<void>[] = [];
   for (const [shardKey, shard] of nameShards.entries()) {
     if (Object.keys(shard).length === 0) continue;
-    await saveNameShard(projectId, shardKey, shard);
+    nameShardSaves.push(saveNameShard(projectId, shardKey, shard));
   }
+  const reverseShardSaves: Promise<void>[] = [];
   for (const [bucket, shard] of reverseShards.entries()) {
     if (Object.keys(shard).length === 0) continue;
-    await saveReverseShard(projectId, bucket, shard);
+    reverseShardSaves.push(saveReverseShard(projectId, bucket, shard));
   }
+  await Promise.all([...nameShardSaves, ...reverseShardSaves]);
 
   const meta: SymbolGraphMeta = {
     projectId,
