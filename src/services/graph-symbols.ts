@@ -7,7 +7,7 @@
  * Populated in Phase B with ast-grep patterns for each language.
  */
 
-import { Lang, parse } from "@ast-grep/napi";
+import { Lang, parse, type SgNode } from "@ast-grep/napi";
 import { getLanguageFromExtension } from "../constants.js";
 import type { SymbolEdge, SymbolKind, SymbolNode } from "../types.js";
 import { logger } from "./logger.js";
@@ -66,12 +66,18 @@ function findCallerId(scopes: ScopeFrame[], line: number, fallback: string): str
 /**
  * Public entry point: extract symbols and raw call sites from a source file.
  * Returns empty arrays if the language is unsupported or parsing fails.
+ *
+ * `parsedRoot` lets `buildCodeGraph` parse a file once and share the AST with
+ * both `extractImports` and `extractSymbolsAndCalls`. When omitted, each
+ * language helper parses internally as before. Languages that fall back to
+ * regex (Dart, Lua, Svelte, Vue) ignore the argument.
  */
 export function extractSymbolsAndCalls(
   source: string,
   lang: Lang | string,
   ext: string,
   relativePath: string,
+  parsedRoot?: SgNode,
 ): ExtractedSymbols {
   const language = getLanguageFromExtension(ext);
   const langKey = String(lang);
@@ -94,37 +100,37 @@ export function extractSymbolsAndCalls(
       langKey === Lang.TypeScript ||
       langKey === Lang.Tsx
     ) {
-      return extractFromTsLike(source, lang as Lang, relativePath, language, moduleSymbol);
+      return extractFromTsLike(source, lang as Lang, relativePath, language, moduleSymbol, parsedRoot);
     }
     if (langKey === "python") {
-      return extractFromPython(source, relativePath, language, moduleSymbol);
+      return extractFromPython(source, relativePath, language, moduleSymbol, parsedRoot);
     }
     if (langKey === "go") {
-      return extractFromGo(source, relativePath, language, moduleSymbol);
+      return extractFromGo(source, relativePath, language, moduleSymbol, parsedRoot);
     }
     if (langKey === "rust") {
-      return extractFromRust(source, relativePath, language, moduleSymbol);
+      return extractFromRust(source, relativePath, language, moduleSymbol, parsedRoot);
     }
     if (langKey === "java" || langKey === "kotlin" || langKey === "scala") {
-      return extractFromJvm(source, lang as string, relativePath, language, moduleSymbol);
+      return extractFromJvm(source, lang as string, relativePath, language, moduleSymbol, parsedRoot);
     }
     if (langKey === "csharp") {
-      return extractFromCSharp(source, relativePath, language, moduleSymbol);
+      return extractFromCSharp(source, relativePath, language, moduleSymbol, parsedRoot);
     }
     if (langKey === "c" || langKey === "cpp") {
-      return extractFromCFamily(source, lang as string, relativePath, language, moduleSymbol);
+      return extractFromCFamily(source, lang as string, relativePath, language, moduleSymbol, parsedRoot);
     }
     if (langKey === "ruby") {
-      return extractFromRuby(source, relativePath, language, moduleSymbol);
+      return extractFromRuby(source, relativePath, language, moduleSymbol, parsedRoot);
     }
     if (langKey === "php") {
-      return extractFromPhp(source, relativePath, language, moduleSymbol);
+      return extractFromPhp(source, relativePath, language, moduleSymbol, parsedRoot);
     }
     if (langKey === "swift") {
-      return extractFromSwift(source, relativePath, language, moduleSymbol);
+      return extractFromSwift(source, relativePath, language, moduleSymbol, parsedRoot);
     }
     if (langKey === "bash") {
-      return extractFromBash(source, relativePath, language, moduleSymbol);
+      return extractFromBash(source, relativePath, language, moduleSymbol, parsedRoot);
     }
     // Dart, Lua, Svelte, Vue and others fall through to the regex fallback.
     return extractFromRegex(source, relativePath, language, moduleSymbol);
@@ -146,8 +152,9 @@ function extractFromTsLike(
   file: string,
   language: string,
   moduleSym: SymbolNode,
+  parsedRoot?: SgNode,
 ): ExtractedSymbols {
-  const root = parse(lang, source).root();
+  const root = parsedRoot ?? parse(lang, source).root();
   const symbols: SymbolNode[] = [moduleSym];
   const scopes: ScopeFrame[] = [];
 
@@ -274,8 +281,9 @@ function extractFromPython(
   file: string,
   language: string,
   moduleSym: SymbolNode,
+  parsedRoot?: SgNode,
 ): ExtractedSymbols {
-  const root = parse("python" as unknown as Lang, source).root();
+  const root = parsedRoot ?? parse("python" as unknown as Lang, source).root();
   const symbols: SymbolNode[] = [moduleSym];
   const scopes: ScopeFrame[] = [];
 
@@ -353,8 +361,9 @@ function extractFromGo(
   file: string,
   language: string,
   moduleSym: SymbolNode,
+  parsedRoot?: SgNode,
 ): ExtractedSymbols {
-  const root = parse("go" as unknown as Lang, source).root();
+  const root = parsedRoot ?? parse("go" as unknown as Lang, source).root();
   const symbols: SymbolNode[] = [moduleSym];
   const scopes: ScopeFrame[] = [];
 
@@ -408,8 +417,9 @@ function extractFromRust(
   file: string,
   language: string,
   moduleSym: SymbolNode,
+  parsedRoot?: SgNode,
 ): ExtractedSymbols {
-  const root = parse("rust" as unknown as Lang, source).root();
+  const root = parsedRoot ?? parse("rust" as unknown as Lang, source).root();
   const symbols: SymbolNode[] = [moduleSym];
   const scopes: ScopeFrame[] = [];
 
@@ -460,8 +470,9 @@ function extractFromJvm(
   file: string,
   language: string,
   moduleSym: SymbolNode,
+  parsedRoot?: SgNode,
 ): ExtractedSymbols {
-  const root = parse(langKey as unknown as Lang, source).root();
+  const root = parsedRoot ?? parse(langKey as unknown as Lang, source).root();
   const symbols: SymbolNode[] = [moduleSym];
   const scopes: ScopeFrame[] = [];
 
@@ -540,8 +551,9 @@ function extractFromCSharp(
   file: string,
   language: string,
   moduleSym: SymbolNode,
+  parsedRoot?: SgNode,
 ): ExtractedSymbols {
-  const root = parse("csharp" as unknown as Lang, source).root();
+  const root = parsedRoot ?? parse("csharp" as unknown as Lang, source).root();
   const symbols: SymbolNode[] = [moduleSym];
   const scopes: ScopeFrame[] = [];
 
@@ -605,8 +617,9 @@ function extractFromCFamily(
   file: string,
   language: string,
   moduleSym: SymbolNode,
+  parsedRoot?: SgNode,
 ): ExtractedSymbols {
-  const root = parse(langKey as unknown as Lang, source).root();
+  const root = parsedRoot ?? parse(langKey as unknown as Lang, source).root();
   const symbols: SymbolNode[] = [moduleSym];
   const scopes: ScopeFrame[] = [];
 
@@ -672,8 +685,9 @@ function extractFromRuby(
   file: string,
   language: string,
   moduleSym: SymbolNode,
+  parsedRoot?: SgNode,
 ): ExtractedSymbols {
-  const root = parse("ruby" as unknown as Lang, source).root();
+  const root = parsedRoot ?? parse("ruby" as unknown as Lang, source).root();
   const symbols: SymbolNode[] = [moduleSym];
   const scopes: ScopeFrame[] = [];
 
@@ -733,8 +747,9 @@ function extractFromPhp(
   file: string,
   language: string,
   moduleSym: SymbolNode,
+  parsedRoot?: SgNode,
 ): ExtractedSymbols {
-  const root = parse("php" as unknown as Lang, source).root();
+  const root = parsedRoot ?? parse("php" as unknown as Lang, source).root();
   const symbols: SymbolNode[] = [moduleSym];
   const scopes: ScopeFrame[] = [];
 
@@ -798,8 +813,9 @@ function extractFromSwift(
   file: string,
   language: string,
   moduleSym: SymbolNode,
+  parsedRoot?: SgNode,
 ): ExtractedSymbols {
-  const root = parse("swift" as unknown as Lang, source).root();
+  const root = parsedRoot ?? parse("swift" as unknown as Lang, source).root();
   const symbols: SymbolNode[] = [moduleSym];
   const scopes: ScopeFrame[] = [];
 
@@ -862,8 +878,9 @@ function extractFromBash(
   file: string,
   language: string,
   moduleSym: SymbolNode,
+  parsedRoot?: SgNode,
 ): ExtractedSymbols {
-  const root = parse("bash" as unknown as Lang, source).root();
+  const root = parsedRoot ?? parse("bash" as unknown as Lang, source).root();
   const symbols: SymbolNode[] = [moduleSym];
   const scopes: ScopeFrame[] = [];
 

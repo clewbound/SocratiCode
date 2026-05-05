@@ -4,7 +4,7 @@
 import fs from "node:fs/promises";
 import { createRequire } from "node:module";
 import path from "node:path";
-import { Lang, registerDynamicLanguage } from "@ast-grep/napi";
+import { Lang, parse, registerDynamicLanguage, type SgNode } from "@ast-grep/napi";
 import { graphCollectionName, projectIdFromPath } from "../config.js";
 import { EXTRA_EXTENSIONS, getLanguageFromExtension, MAX_GRAPH_FILE_BYTES } from "../constants.js";
 import type {
@@ -576,6 +576,33 @@ export function ensureDynamicLanguages(): void {
 
 // ── Language mapping for ast-grep ────────────────────────────────────────
 
+/** Languages where `extractImports` and `extractSymbolsAndCalls` both AST-parse
+ *  the same source with the same ast-grep `Lang`. For these we can parse once
+ *  upstream and pass the root to both extractors, halving parse work in the
+ *  hot loop. Excludes:
+ *   - Composite langs (svelte/vue) which need a separate HTML+TS parse pass.
+ *   - Regex-only langs (dart/lua) which never call ast-grep.
+ *   - CSS, where only `extractImports` runs (and only as regex over source);
+ *     parsing upstream would just throw away work. */
+const SHARED_PARSE_LANGS: ReadonlySet<Lang | string> = new Set<Lang | string>([
+  Lang.JavaScript,
+  Lang.TypeScript,
+  Lang.Tsx,
+  "python",
+  "go",
+  "rust",
+  "java",
+  "kotlin",
+  "scala",
+  "csharp",
+  "c",
+  "cpp",
+  "ruby",
+  "php",
+  "swift",
+  "bash",
+]);
+
 /** Map file extensions to ast-grep language identifiers */
 export function getAstGrepLang(ext: string): Lang | string | null {
   const map: Record<string, Lang | string> = {
@@ -759,8 +786,28 @@ export async function buildCodeGraph(
     const node = nodesMap.get(relPath);
     if (!node) continue;
 
+    // Parse once per file when both extractors will use the same ast-grep
+    // Lang. `extractImports` and `extractSymbolsAndCalls` accept the root and
+    // skip their own internal parse. Composite (svelte/vue) and regex-only
+    // (dart/lua) langs leave this `undefined` and let each extractor handle
+    // its own parsing path.
+    let parsedRoot: SgNode | undefined;
+    if (SHARED_PARSE_LANGS.has(lang)) {
+      try {
+        parsedRoot = parse(lang, source).root();
+      } catch (err) {
+        // Fall through to extractor-internal parsing on failure — preserves
+        // the original error-handling path (each extractor logs + recovers).
+        logger.debug("Upstream parse failed, falling back to per-extractor parse", {
+          file: relPath,
+          lang: String(lang),
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
     // Extract imports using ast-grep
-    const importInfos = extractImports(source, lang, ext);
+    const importInfos = extractImports(source, lang, ext, parsedRoot);
 
     // Hash the source once now — `persistSymbolGraph` consumes this map so
     // it can skip re-reading every file just to compute SHA-256.
@@ -768,7 +815,7 @@ export async function buildCodeGraph(
 
     // Extract symbols & raw call sites in the same pass
     try {
-      const extracted = extractSymbolsAndCalls(source, lang, ext, relPath);
+      const extracted = extractSymbolsAndCalls(source, lang, ext, relPath, parsedRoot);
       symbolsByFile.set(relPath, extracted.symbols);
       outgoingCallsByFile.set(relPath, rawCallsToUnresolvedEdges(extracted.rawCalls));
     } catch (err) {
