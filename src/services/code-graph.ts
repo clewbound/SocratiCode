@@ -285,7 +285,12 @@ async function doRebuildGraph(
         resolveCallSites(graph, built.symbolsByFile, built.outgoingCallsByFile);
 
         progress.phase = "persisting symbols";
-        await persistSymbolGraph(projectId, resolvedPath, built.symbolsByFile, built.outgoingCallsByFile);
+        await persistSymbolGraph(
+          projectId,
+          built.symbolsByFile,
+          built.outgoingCallsByFile,
+          built.contentHashByFile,
+        );
       } catch (err) {
         logger.warn("Symbol graph build failed (file-import graph saved)", {
           projectPath: resolvedPath,
@@ -320,16 +325,22 @@ async function doRebuildGraph(
   }
 }
 
-/** Persist the symbol graph: per-file payloads + sharded indices + meta. */
+/** Persist the symbol graph: per-file payloads + sharded indices + meta.
+ *
+ * `contentHashByFile` is computed by `buildCodeGraph` during the in-memory
+ * parse pass (the source string is already in scope there), so this function
+ * never re-reads files from disk. Missing entries fall back to an empty hash
+ * — matches the prior behaviour for files whose source could not be read. */
 async function persistSymbolGraph(
   projectId: string,
-  resolvedPath: string,
   symbolsByFile: Map<string, SymbolNode[]>,
   outgoingCallsByFile: Map<string, SymbolEdge[]>,
+  contentHashByFile: Map<string, string>,
 ): Promise<void> {
   await ensureSymbolGraphCollections(projectId);
 
-  // Build per-file payloads (need source bytes for contentHash).
+  // Build per-file payloads — `contentHash` was computed during the in-memory
+  // parse pass; no third I/O pass needed here.
   const payloads: SymbolGraphFilePayload[] = [];
   let totalSymbols = 0;
   let totalEdges = 0;
@@ -340,13 +351,7 @@ async function persistSymbolGraph(
     if (firstNonModule) language = firstNonModule.language;
     else language = symbols[0]?.language ?? language;
 
-    let contentHash = "";
-    try {
-      const src = await fs.readFile(path.join(resolvedPath, relPath), "utf-8");
-      contentHash = contentHashOf(src);
-    } catch {
-      // ignore
-    }
+    const contentHash = contentHashByFile.get(relPath) ?? "";
     payloads.push({
       file: relPath, language, contentHash, symbols, outgoingCalls,
     });
@@ -656,6 +661,9 @@ export async function buildCodeGraph(
 ): Promise<CodeGraph & {
   symbolsByFile: Map<string, SymbolNode[]>;
   outgoingCallsByFile: Map<string, SymbolEdge[]>;
+  /** SHA-256 of each file's source, computed during the parse pass so
+   *  `persistSymbolGraph` does not have to re-read every file from disk. */
+  contentHashByFile: Map<string, string>;
 }> {
   ensureDynamicLanguages();
 
@@ -675,6 +683,9 @@ export async function buildCodeGraph(
   const edges: CodeGraphEdge[] = [];
   const symbolsByFile = new Map<string, SymbolNode[]>();
   const outgoingCallsByFile = new Map<string, SymbolEdge[]>();
+  // Hash each file's source once during the parse pass — `persistSymbolGraph`
+  // reads from this map instead of re-opening every file from disk.
+  const contentHashByFile = new Map<string, string>();
 
   // Build a suffix lookup map for JVM multi-module projects (Java/Kotlin/Scala).
   // This resolves FQNs like com.example.Foo when the class lives under a nested
@@ -745,6 +756,10 @@ export async function buildCodeGraph(
     // Extract imports using ast-grep
     const importInfos = extractImports(source, lang, ext);
 
+    // Hash the source once now — `persistSymbolGraph` consumes this map so
+    // it can skip re-reading every file just to compute SHA-256.
+    contentHashByFile.set(relPath, contentHashOf(source));
+
     // Extract symbols & raw call sites in the same pass
     try {
       const extracted = extractSymbolsAndCalls(source, lang, ext, relPath);
@@ -798,5 +813,6 @@ export async function buildCodeGraph(
     edges,
     symbolsByFile,
     outgoingCallsByFile,
+    contentHashByFile,
   };
 }
