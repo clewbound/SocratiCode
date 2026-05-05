@@ -5,7 +5,7 @@ import { execSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { collectionName, projectIdFromPath } from "../../src/config.js";
+import { collectionName, coreProjectId, projectIdFromPath } from "../../src/config.js";
 import { ensureQdrantReady } from "../../src/services/docker.js";
 import {
   getIndexableFiles,
@@ -461,15 +461,21 @@ describe.skipIf(!dockerAvailable)("indexer service — sibling-clone fast path",
     "indexes a fresh collection in seconds when content matches sibling",
     async () => {
       const fixture = createFixtureProject("clone-no-diff");
+      // Sibling discovery filters by `coreProjectId` (path hash), so
+      // source + target ids must share that prefix and only differ in the
+      // branch-aware suffix the production naming uses.
+      const coreId = coreProjectId(fixture.root);
+      const sourceId = `${coreId}__source`;
+      const targetId = `${coreId}__target`;
       try {
         initGitFixture(fixture);
 
-        process.env.SOCRATICODE_PROJECT_ID = "clone-test-source";
+        process.env.SOCRATICODE_PROJECT_ID = sourceId;
         const first = await indexProject(fixture.root);
         expect(first.chunksCreated).toBeGreaterThan(0);
 
         // Re-index under a different project ID with the same content.
-        process.env.SOCRATICODE_PROJECT_ID = "clone-test-target";
+        process.env.SOCRATICODE_PROJECT_ID = targetId;
         const messages: string[] = [];
         const start = Date.now();
         const result = await indexProject(fixture.root, (m) => messages.push(m));
@@ -479,7 +485,7 @@ describe.skipIf(!dockerAvailable)("indexer service — sibling-clone fast path",
         expect(elapsedMs).toBeLessThan(60_000);
         expect(result.chunksCreated).toBe(0);
       } finally {
-        for (const projectId of ["clone-test-source", "clone-test-target"]) {
+        for (const projectId of [sourceId, targetId]) {
           process.env.SOCRATICODE_PROJECT_ID = projectId;
           try {
             await removeProjectIndex(fixture.root);
@@ -498,10 +504,13 @@ describe.skipIf(!dockerAvailable)("indexer service — sibling-clone fast path",
     "scans only the diff when a file is modified",
     async () => {
       const fixture = createFixtureProject("clone-with-diff");
+      const coreId = coreProjectId(fixture.root);
+      const sourceId = `${coreId}__diff-source`;
+      const targetId = `${coreId}__diff-target`;
       try {
         initGitFixture(fixture);
 
-        process.env.SOCRATICODE_PROJECT_ID = "clone-diff-source";
+        process.env.SOCRATICODE_PROJECT_ID = sourceId;
         const first = await indexProject(fixture.root);
         const baselineChunks = first.chunksCreated;
         expect(baselineChunks).toBeGreaterThan(0);
@@ -531,7 +540,7 @@ export function fibonacci(n: number): number {
 `,
         );
 
-        process.env.SOCRATICODE_PROJECT_ID = "clone-diff-target";
+        process.env.SOCRATICODE_PROJECT_ID = targetId;
         const messages: string[] = [];
         const start = Date.now();
         const result = await indexProject(fixture.root, (m) => messages.push(m));
@@ -542,7 +551,7 @@ export function fibonacci(n: number): number {
         expect(result.chunksCreated).toBeLessThan(baselineChunks);
         expect(elapsedMs).toBeLessThan(90_000);
       } finally {
-        for (const projectId of ["clone-diff-source", "clone-diff-target"]) {
+        for (const projectId of [sourceId, targetId]) {
           process.env.SOCRATICODE_PROJECT_ID = projectId;
           try {
             await removeProjectIndex(fixture.root);
@@ -568,10 +577,13 @@ export function fibonacci(n: number): number {
       // passes `currentFileSet = new Set(allFiles)` so the cleanup loop only
       // evicts chunks for files genuinely missing from disk.
       const fixture = createFixtureProject("clone-preserve-unchanged");
+      const coreId = coreProjectId(fixture.root);
+      const sourceId = `${coreId}__preserve-source`;
+      const targetId = `${coreId}__preserve-target`;
       try {
         initGitFixture(fixture);
 
-        process.env.SOCRATICODE_PROJECT_ID = "clone-preserve-source";
+        process.env.SOCRATICODE_PROJECT_ID = sourceId;
         const first = await indexProject(fixture.root);
         expect(first.chunksCreated).toBeGreaterThan(0);
 
@@ -588,13 +600,13 @@ export function add(a: number, b: number): number {
 `,
         );
 
-        process.env.SOCRATICODE_PROJECT_ID = "clone-preserve-target";
+        process.env.SOCRATICODE_PROJECT_ID = targetId;
         const messages: string[] = [];
         const result = await indexProject(fixture.root, (m) => messages.push(m));
         expect(messages.some((m) => /sibling.clone/i.test(m))).toBe(true);
         expect(result.chunksCreated).toBeGreaterThan(0);
 
-        const targetCollection = collectionName("clone-preserve-target");
+        const targetCollection = collectionName(targetId);
         const qdrant = (await import("../../src/services/qdrant.js")).getClient();
 
         // Pull all points whose relativePath matches an unchanged file.
@@ -631,7 +643,7 @@ export function add(a: number, b: number): number {
         const modifiedCount = await countChunksForPath("src/utils/math.ts");
         expect(modifiedCount).toBeGreaterThan(0);
       } finally {
-        for (const projectId of ["clone-preserve-source", "clone-preserve-target"]) {
+        for (const projectId of [sourceId, targetId]) {
           process.env.SOCRATICODE_PROJECT_ID = projectId;
           try {
             await removeProjectIndex(fixture.root);
