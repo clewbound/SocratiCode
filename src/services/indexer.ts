@@ -1353,13 +1353,105 @@ export async function indexProject(
         const graphFresh =
           codegraphCloned ||
           (await isGraphFresh(resolvedPath, currentGitBlobShas).catch(() => false));
+
+        // Small-diff sibling-clone fast path (Phase 4-A).
+        //   Mirrors the watcher path's incremental strategy: when the diff is
+        //   small (≤ INCREMENTAL_SYMBOL_THRESHOLD files) we clone the sibling's
+        //   symgraph collections to seed a baseline, rebuild only the
+        //   file-import graph (parse pass #1 — mostly cache hits thanks to
+        //   Phase 4-E's blob-sha symbol cache), then patch only the changed
+        //   files' symbol payloads. Avoids the ~150s end-to-end symbol-graph
+        //   rebuild for small branch diffs.
+        //
+        //   `rebuildGraph(skipSymbolGraph: true)` overwrites the codegraph
+        //   metadata point via saveGraphData, so we deliberately do NOT clone
+        //   that point here — only the three symgraph collections need a
+        //   baseline for the incremental updater to mutate.
+        const smallDiffChangedCount =
+          diff.modified.length + diff.added.length + diff.deleted.length;
+        const smallDiffEligible =
+          !graphFresh &&
+          sibling.hasCompleteGraphState &&
+          smallDiffChangedCount > 0 &&
+          smallDiffChangedCount <= INCREMENTAL_SYMBOL_THRESHOLD;
+        let smallDiffApplied = false;
+        if (smallDiffEligible) {
+          const siblingProjectId = sibling.collectionName.replace(
+            /^codebase_/,
+            "",
+          );
+          try {
+            progress.phase = "cloning symbol graph baseline";
+            await replaceCollectionFromSibling(
+              symgraphMetaCollectionName(siblingProjectId),
+              symgraphMetaCollectionName(projectId),
+            );
+            await replaceCollectionFromSibling(
+              symgraphFileCollectionName(siblingProjectId),
+              symgraphFileCollectionName(projectId),
+            );
+            await replaceCollectionFromSibling(
+              symgraphIndexCollectionName(siblingProjectId),
+              symgraphIndexCollectionName(projectId),
+            );
+            // Drop the in-process symbol-graph cache so the incremental
+            // updater reads the freshly-cloned shards from Qdrant rather
+            // than any stale cached state for this projectId.
+            dropSymbolGraphCache(projectId);
+
+            progress.phase = "building code graph";
+            const graph = await rebuildGraph(resolvedPath, {
+              skipSymbolGraph: true,
+              gitBlobShas: currentGitBlobShas,
+            });
+            onProgress?.(
+              `Code graph: ${graph.nodes.length} files, ${graph.edges.length} edges (file-import only)`,
+            );
+
+            const incResult = await updateChangedFilesSymbolGraph(
+              projectId,
+              resolvedPath,
+              graph,
+              [...diff.modified, ...diff.added],
+              diff.deleted,
+            );
+            if (incResult.fullRebuildRequired) {
+              // Cloned meta vanished or was malformed — fall back to a full
+              // symbol-graph rebuild. Rare, but safe.
+              onProgress?.(
+                "Symbol graph meta missing after clone — falling back to full rebuild",
+              );
+              await rebuildGraph(resolvedPath, {
+                skipSymbolGraph: false,
+                gitBlobShas: currentGitBlobShas,
+              });
+            } else {
+              onProgress?.(
+                `Symbol graph patched: +${incResult.symbolsDelta} symbols, ` +
+                  `+${incResult.edgesDelta} edges (${incResult.filesChanged} changed, ${incResult.filesRemoved} removed)`,
+              );
+            }
+            smallDiffApplied = true;
+          } catch (smallDiffErr) {
+            const smallDiffMsg =
+              smallDiffErr instanceof Error
+                ? smallDiffErr.message
+                : String(smallDiffErr);
+            logger.warn(
+              "Sibling-clone small-diff incremental path failed; falling through to full rebuild",
+              { projectPath: resolvedPath, error: smallDiffMsg },
+            );
+            // Fall through to the full-rebuild branch below.
+          }
+        }
+
         if (graphFresh) {
           onProgress?.(`Code graph fresh — skipping rebuild.`);
           logger.info("Code graph fresh, skipping rebuild", {
             resolvedPath,
             cloned: codegraphCloned,
           });
-        } else {
+        } else if (!smallDiffApplied) {
           try {
             const graph = await rebuildGraph(resolvedPath, {
               gitBlobShas: currentGitBlobShas,
