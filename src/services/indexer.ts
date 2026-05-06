@@ -1357,18 +1357,28 @@ export async function indexProject(
         // by both the zero-diff and small-diff paths (each path calls this at
         // most once, so there's no double-clone within a single run).
         const cloneSymgraphsFromSibling = async (): Promise<void> => {
-          await replaceCollectionFromSibling(
-            symgraphMetaCollectionName(siblingProjectId),
-            symgraphMetaCollectionName(projectId),
-          );
-          await replaceCollectionFromSibling(
-            symgraphFileCollectionName(siblingProjectId),
-            symgraphFileCollectionName(projectId),
-          );
-          await replaceCollectionFromSibling(
-            symgraphIndexCollectionName(siblingProjectId),
-            symgraphIndexCollectionName(projectId),
-          );
+          // The three target collections are disjoint (distinct suffixes:
+          // _symgraph_meta / _symgraph_file / _symgraph_index) and
+          // `replaceCollectionFromSibling` holds no shared in-memory state
+          // across calls. Qdrant serves snapshot+recover concurrently, and
+          // `probeWriteReadiness` uses a randomized sentinel id to avoid
+          // collisions. Running them in parallel takes wall-time down to the
+          // slowest of the three (the index clone) instead of summing all
+          // three.
+          await Promise.all([
+            replaceCollectionFromSibling(
+              symgraphMetaCollectionName(siblingProjectId),
+              symgraphMetaCollectionName(projectId),
+            ),
+            replaceCollectionFromSibling(
+              symgraphFileCollectionName(siblingProjectId),
+              symgraphFileCollectionName(projectId),
+            ),
+            replaceCollectionFromSibling(
+              symgraphIndexCollectionName(siblingProjectId),
+              symgraphIndexCollectionName(projectId),
+            ),
+          ]);
         };
 
         // `pathHandled` indicates the chosen path completed (or fresh-skip).
