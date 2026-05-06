@@ -4,6 +4,42 @@ All notable changes to SocratiCode are documented here.
 This project uses [Conventional Commits](https://www.conventionalcommits.org/) and [Semantic Versioning](https://semver.org/).
 
 
+## [1.8.8](https://github.com/giancarloerra/socraticode/compare/v1.8.7...v1.8.8) (2026-05-06)
+
+### Features
+
+* **config:** support projectId in .socraticode.json for team-shared indexes ([#53](https://github.com/giancarloerra/socraticode/issues/53)) ([2c4d55c](https://github.com/giancarloerra/socraticode/commit/2c4d55ca50ae4eb60bb365dbcbff7923db4966e3))
+
+## [1.8.7](https://github.com/giancarloerra/socraticode/compare/v1.8.6...v1.8.7) (2026-05-06)
+
+### Bug Fixes
+
+* **context:** checkpoint artifact metadata after each successful index ([#52](https://github.com/giancarloerra/socraticode/issues/52)) ([2007a18](https://github.com/giancarloerra/socraticode/commit/2007a18865d31cad3be6f5e2e88f834156c5df37))
+
+## [1.8.6](https://github.com/giancarloerra/socraticode/compare/v1.8.5...v1.8.6) (2026-05-05)
+
+### Features
+
+* **qdrant:** add QDRANT_COLLECTION_PREFIX env var for shared instances ([70db002](https://github.com/giancarloerra/socraticode/commit/70db002796a76596badfed86c25d5af6c0331e69))
+
+## [1.8.5](https://github.com/giancarloerra/socraticode/compare/v1.8.4...v1.8.5) (2026-05-05)
+
+### Bug Fixes
+
+* **graph:** allow Go resolution for projects with golang.org/* module paths ([8c26ed8](https://github.com/giancarloerra/socraticode/commit/8c26ed8b49f8aae030d519aca3a0ab84ad07d90d))
+* **graph:** resolve Go imports via go.mod module path ([c156da1](https://github.com/giancarloerra/socraticode/commit/c156da1688e4e2b8b9c1dfb042094b018131d8f7))
+* **graph:** resolve Python sibling-flat imports in service-style monorepos ([8921690](https://github.com/giancarloerra/socraticode/commit/8921690d7286ba858337d2df478ef01772d6d055))
+
+### Documentation
+
+* add note about MCP governance and JanuScope ([bf36c0c](https://github.com/giancarloerra/socraticode/commit/bf36c0c1b7d3ceb73161afe20628cc994dca404c))
+
+## [1.8.4](https://github.com/giancarloerra/socraticode/compare/v1.8.3...v1.8.4) (2026-05-04)
+
+### Bug Fixes
+
+* **graph:** pre-validate ast-grep grammar libraryPath to survive missing prebuilds ([#44](https://github.com/giancarloerra/socraticode/issues/44)) ([e6ce327](https://github.com/giancarloerra/socraticode/commit/e6ce32710acccd6cb4a241c39a3561803e0e7dbd))
+
 ## [1.8.3](https://github.com/giancarloerra/socraticode/compare/v1.8.2...v1.8.3) (2026-05-04)
 
 ### Features
