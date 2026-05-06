@@ -1086,6 +1086,13 @@ export async function indexProject(
   // future fast-path detection silently degrades to a normal scan.
   const currentGitBlobShas = await getGitBlobShas(resolvedPath);
 
+  // Set to true once the sibling-clone path has produced a usable codegraph
+  // (clone, incremental rebuild, or full rebuild). The normal-flow fall-back
+  // checks this so a late failure inside sibling-clone (e.g. saveProjectMetadata
+  // throws after the small-diff path already rebuilt the graph) doesn't
+  // trigger a redundant ~50s buildCodeGraph in the 4-G concurrent IIFE.
+  let graphAlreadyBuilt = false;
+
   // Smart re-index: check if collection already has data.
   // getCollectionInfo now throws on transient errors (instead of returning null),
   // so a Qdrant blip will abort the operation rather than trigger a false clean-start.
@@ -1508,6 +1515,12 @@ export async function indexProject(
           }
         }
 
+        // The sibling-clone path's graph work is done. If anything below
+        // (saveProjectMetadata, etc.) throws and the outer catch falls us
+        // through to normal-flow, the 4-G concurrent IIFE must NOT redo the
+        // build — we already have a usable codegraph + symgraphs in Qdrant.
+        graphAlreadyBuilt = true;
+
         progress.phase = "saving metadata";
         await saveProjectMetadata(
           collection,
@@ -1598,18 +1611,34 @@ export async function indexProject(
 
   // Compute graph freshness up-front (cheap; one Qdrant retrieve) so the
   // graph promise is a no-op when the working tree hasn't moved.
+  // `graphAlreadyBuilt` short-circuits the freshness read when the
+  // sibling-clone path already produced a graph for this run — see the
+  // outer-catch fall-through path: a late failure in saveProjectMetadata
+  // (etc.) lands us here with a fully-built codegraph from the small-diff
+  // or full-rebuild branch above, and the 4-G IIFE must not redo the work.
   const cgFresh =
-    currentGitBlobShas !== null
+    graphAlreadyBuilt ||
+    (currentGitBlobShas !== null
       ? await isGraphFresh(resolvedPath, currentGitBlobShas).catch(() => false)
-      : false;
+      : false);
 
   // Kick off the graph build. The IIFE shape ensures the promise is
   // scheduled NOW (before we await scan), so the two pipelines actually
   // run concurrently rather than serializing on the await order.
   const graphPromise: Promise<void> = cgFresh
     ? (async () => {
-        onProgress?.(`Code graph fresh — skipping rebuild.`);
-        logger.info("Code graph fresh, skipping rebuild", { resolvedPath });
+        if (graphAlreadyBuilt) {
+          onProgress?.(
+            `Code graph already built by sibling-clone path — skipping rebuild.`,
+          );
+          logger.info(
+            "Code graph already built earlier in this run; skipping rebuild",
+            { resolvedPath },
+          );
+        } else {
+          onProgress?.(`Code graph fresh — skipping rebuild.`);
+          logger.info("Code graph fresh, skipping rebuild", { resolvedPath });
+        }
       })()
     : (async () => {
         onProgress?.("Building code dependency graph...");
