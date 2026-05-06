@@ -4,7 +4,7 @@
 import fs from "node:fs/promises";
 import { createRequire } from "node:module";
 import path from "node:path";
-import { Lang, registerDynamicLanguage } from "@ast-grep/napi";
+import { Lang, parse, registerDynamicLanguage, type SgNode } from "@ast-grep/napi";
 import { graphCollectionName, projectIdFromPath } from "../config.js";
 import { EXTRA_EXTENSIONS, getLanguageFromExtension, MAX_GRAPH_FILE_BYTES, toForwardSlash } from "../constants.js";
 import type {
@@ -211,7 +211,12 @@ async function doRebuildGraph(
         resolveCallSites(graph, built.symbolsByFile, built.outgoingCallsByFile);
 
         progress.phase = "persisting symbols";
-        await persistSymbolGraph(projectId, resolvedPath, built.symbolsByFile, built.outgoingCallsByFile);
+        await persistSymbolGraph(
+          projectId,
+          built.symbolsByFile,
+          built.outgoingCallsByFile,
+          built.contentHashByFile,
+        );
       } catch (err) {
         logger.warn("Symbol graph build failed (file-import graph saved)", {
           projectPath: resolvedPath,
@@ -246,16 +251,22 @@ async function doRebuildGraph(
   }
 }
 
-/** Persist the symbol graph: per-file payloads + sharded indices + meta. */
+/** Persist the symbol graph: per-file payloads + sharded indices + meta.
+ *
+ * `contentHashByFile` is computed by `buildCodeGraph` during the in-memory
+ * parse pass (the source string is already in scope there), so this function
+ * never re-reads files from disk. Missing entries fall back to an empty hash
+ * — matches the prior behaviour for files whose source could not be read. */
 async function persistSymbolGraph(
   projectId: string,
-  resolvedPath: string,
   symbolsByFile: Map<string, SymbolNode[]>,
   outgoingCallsByFile: Map<string, SymbolEdge[]>,
+  contentHashByFile: Map<string, string>,
 ): Promise<void> {
   await ensureSymbolGraphCollections(projectId);
 
-  // Build per-file payloads (need source bytes for contentHash).
+  // Build per-file payloads — `contentHash` was computed during the in-memory
+  // parse pass; no third I/O pass needed here.
   const payloads: SymbolGraphFilePayload[] = [];
   let totalSymbols = 0;
   let totalEdges = 0;
@@ -266,13 +277,7 @@ async function persistSymbolGraph(
     if (firstNonModule) language = firstNonModule.language;
     else language = symbols[0]?.language ?? language;
 
-    let contentHash = "";
-    try {
-      const src = await fs.readFile(path.join(resolvedPath, relPath), "utf-8");
-      contentHash = contentHashOf(src);
-    } catch {
-      // ignore
-    }
+    const contentHash = contentHashByFile.get(relPath) ?? "";
     payloads.push({
       file: relPath, language, contentHash, symbols, outgoingCalls,
     });
@@ -542,6 +547,33 @@ export function ensureDynamicLanguages(): void {
 
 // ── Language mapping for ast-grep ────────────────────────────────────────
 
+/** Languages where `extractImports` and `extractSymbolsAndCalls` both AST-parse
+ *  the same source with the same ast-grep `Lang`. For these we can parse once
+ *  upstream and pass the root to both extractors, halving parse work in the
+ *  hot loop. Excludes:
+ *   - Composite langs (svelte/vue) which need a separate HTML+TS parse pass.
+ *   - Regex-only langs (dart/lua) which never call ast-grep.
+ *   - CSS, where only `extractImports` runs (and only as regex over source);
+ *     parsing upstream would just throw away work. */
+const SHARED_PARSE_LANGS: ReadonlySet<Lang | string> = new Set<Lang | string>([
+  Lang.JavaScript,
+  Lang.TypeScript,
+  Lang.Tsx,
+  "python",
+  "go",
+  "rust",
+  "java",
+  "kotlin",
+  "scala",
+  "csharp",
+  "c",
+  "cpp",
+  "ruby",
+  "php",
+  "swift",
+  "bash",
+]);
+
 /** Map file extensions to ast-grep language identifiers */
 export function getAstGrepLang(ext: string): Lang | string | null {
   const map: Record<string, Lang | string> = {
@@ -633,6 +665,9 @@ export async function buildCodeGraph(
 ): Promise<CodeGraph & {
   symbolsByFile: Map<string, SymbolNode[]>;
   outgoingCallsByFile: Map<string, SymbolEdge[]>;
+  /** SHA-256 of each file's source, computed during the parse pass so
+   *  `persistSymbolGraph` does not have to re-read every file from disk. */
+  contentHashByFile: Map<string, string>;
 }> {
   ensureDynamicLanguages();
 
@@ -652,6 +687,9 @@ export async function buildCodeGraph(
   const edges: CodeGraphEdge[] = [];
   const symbolsByFile = new Map<string, SymbolNode[]>();
   const outgoingCallsByFile = new Map<string, SymbolEdge[]>();
+  // Hash each file's source once during the parse pass — `persistSymbolGraph`
+  // reads from this map instead of re-opening every file from disk.
+  const contentHashByFile = new Map<string, string>();
 
   // Build a suffix lookup map for JVM multi-module projects (Java/Kotlin/Scala).
   // This resolves FQNs like com.example.Foo when the class lives under a nested
@@ -727,12 +765,36 @@ export async function buildCodeGraph(
     const node = nodesMap.get(relPath);
     if (!node) continue;
 
+    // Parse once per file when both extractors will use the same ast-grep
+    // Lang. `extractImports` and `extractSymbolsAndCalls` accept the root and
+    // skip their own internal parse. Composite (svelte/vue) and regex-only
+    // (dart/lua) langs leave this `undefined` and let each extractor handle
+    // its own parsing path.
+    let parsedRoot: SgNode | undefined;
+    if (SHARED_PARSE_LANGS.has(lang)) {
+      try {
+        parsedRoot = parse(lang, source).root();
+      } catch (err) {
+        // Fall through to extractor-internal parsing on failure — preserves
+        // the original error-handling path (each extractor logs + recovers).
+        logger.debug("Upstream parse failed, falling back to per-extractor parse", {
+          file: relPath,
+          lang: String(lang),
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
     // Extract imports using ast-grep
-    const importInfos = extractImports(source, lang, ext);
+    const importInfos = extractImports(source, lang, ext, parsedRoot);
+
+    // Hash the source once now — `persistSymbolGraph` consumes this map so
+    // it can skip re-reading every file just to compute SHA-256.
+    contentHashByFile.set(relPath, contentHashOf(source));
 
     // Extract symbols & raw call sites in the same pass
     try {
-      const extracted = extractSymbolsAndCalls(source, lang, ext, relPath);
+      const extracted = extractSymbolsAndCalls(source, lang, ext, relPath, parsedRoot);
       symbolsByFile.set(relPath, extracted.symbols);
       outgoingCallsByFile.set(relPath, rawCallsToUnresolvedEdges(extracted.rawCalls));
     } catch (err) {
@@ -783,5 +845,6 @@ export async function buildCodeGraph(
     edges,
     symbolsByFile,
     outgoingCallsByFile,
+    contentHashByFile,
   };
 }
