@@ -4,6 +4,12 @@ All notable changes to SocratiCode are documented here.
 This project uses [Conventional Commits](https://www.conventionalcommits.org/) and [Semantic Versioning](https://semver.org/).
 
 
+## [1.8.8](https://github.com/giancarloerra/socraticode/compare/v1.8.7...v1.8.8) (2026-05-06)
+
+### Features
+
+* **config:** support projectId in .socraticode.json for team-shared indexes ([#53](https://github.com/giancarloerra/socraticode/issues/53)) ([2c4d55c](https://github.com/giancarloerra/socraticode/commit/2c4d55ca50ae4eb60bb365dbcbff7923db4966e3))
+
 ## [1.8.7](https://github.com/giancarloerra/socraticode/compare/v1.8.6...v1.8.7) (2026-05-06)
 
 ### Bug Fixes
