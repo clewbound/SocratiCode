@@ -23,15 +23,18 @@ import { ensureDynamicLanguages, getAstGrepLang, rebuildGraph, removeGraph } fro
 import { ensureArtifactsIndexed, loadConfig, removeAllArtifacts } from "./context-artifacts.js";
 import { type CachedEmbedding, lookupEmbeddings, putEmbedding } from "./embedding-cache.js";
 import { generateEmbeddings, prepareDocumentText } from "./embeddings.js";
-import { getGitBlobShas } from "./git-tree.js";
+import { diffGitTrees, getGitBlobShas } from "./git-tree.js";
 import { createIgnoreFilter, shouldIgnore } from "./ignore.js";
 import { acquireProjectLock, releaseProjectLock } from "./lock.js";
 import { logger } from "./logger.js";
 import {
+  cloneCollectionPoints,
   deleteCollection,
   deleteFileChunks,
+  deleteFileChunksBatch,
   deleteProjectMetadata,
   ensureCollection,
+  findSiblingMetadata,
   getCollectionInfo,
   getProjectMetadata,
   loadProjectGitBlobShas,
@@ -658,164 +661,52 @@ export async function getIndexableFiles(
   });
 }
 
-/** Full index of a project directory */
-export async function indexProject(
-  projectPath: string,
-  onProgress?: (message: string) => void,
-  extraExtensions?: Set<string>,
+/**
+ * Internal options bag for {@link scanAndIndexFiles}. Captures everything the
+ * scan + embed pipeline closes over; deliberately scoped to the minimum the
+ * extracted body needs so future call sites (e.g. the sibling-clone fast path)
+ * can drive the helper with a path subset without touching `indexProject`'s
+ * outer setup.
+ */
+interface ScanAndIndexOptions {
+  resolvedPath: string;
+  collection: string;
+  /** Mutated in-place: scan populates new entries, stale entries get removed. */
+  hashes: Map<string, string>;
+  /** Relative paths to scan + embed. Caller decides full set vs. subset. */
+  targetFiles: string[];
+  progress: IndexingProgress;
+  onProgress?: (message: string) => void;
+  hasExistingData: boolean;
+  /** Set of files currently present + indexable in the working tree. Used by
+   *  the cleanup loop to identify chunks for files genuinely removed from
+   *  disk. Defaults to `new Set(targetFiles)` for backward compatibility with
+   *  the full-project flow where targetFiles === all indexable files.
+   *  The sibling-clone path passes the FULL set so that paths in `hashes`
+   *  (seeded with diff.unchanged) aren't misidentified as deleted. */
+  currentFileSet?: Set<string>;
+}
+
+/**
+ * Pure refactor of the scan + embed pipeline previously inlined in
+ * {@link indexProject}. Behavior is identical: the function consumes
+ * `targetFiles`, scans + chunks, deletes stale chunks for changed/removed
+ * files, embeds + upserts in batches, and persists in-progress checkpoints
+ * along the way. Cancellation between batches still records `lastCompleted`
+ * and returns `cancelled: true` so the caller can short-circuit cleanly.
+ */
+async function scanAndIndexFiles(
+  opts: ScanAndIndexOptions,
 ): Promise<{ filesIndexed: number; chunksCreated: number; cancelled: boolean }> {
-  // Register dynamic AST grammars for AST-aware chunking
-  ensureDynamicLanguages();
-
-  const resolvedPath = path.resolve(projectPath);
-
-  // Cross-process lock: prevent two MCP instances from indexing the same project
-  const lockAcquired = await acquireProjectLock(resolvedPath, "index");
-  if (!lockAcquired) {
-    const msg = "Another process is already indexing this project, skipping";
-    logger.info(msg, { projectPath: resolvedPath });
-    onProgress?.(msg);
-    return { filesIndexed: 0, chunksCreated: 0, cancelled: false };
-  }
-
-  const progress: IndexingProgress = {
-    type: "full-index",
-    startedAt: Date.now(),
-    filesTotal: 0,
-    filesProcessed: 0,
-    phase: "setting up",
-  };
-  indexingInProgress.set(resolvedPath, progress);
-
-  try {
-  const projectId = projectIdFromPath(resolvedPath);
-  const collection = collectionName(projectId);
-  const hashes = await getProjectHashes(projectId, collection, resolvedPath);
-
-  // Snapshot the current git tree once per run. Null when the directory is
-  // not a git checkout — in that case we simply don't persist git shas and
-  // future fast-path detection silently degrades to a normal scan.
-  const currentGitBlobShas = await getGitBlobShas(resolvedPath);
-
-  // Smart re-index: check if collection already has data.
-  // getCollectionInfo now throws on transient errors (instead of returning null),
-  // so a Qdrant blip will abort the operation rather than trigger a false clean-start.
-  let existingInfo: { pointsCount: number; status: string } | null;
-  try {
-    existingInfo = await getCollectionInfo(collection);
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    logger.error("Cannot determine collection state — aborting indexing to protect existing data", {
-      collection,
-      error: msg,
-    });
-    throw new Error(`Failed to check collection state for ${collection}: ${msg}. Aborting to avoid accidental data loss.`);
-  }
-  const hasExistingData = existingInfo !== null && existingInfo.pointsCount > 0;
-
-  // ensureCollection is idempotent — creates if absent, no-op if exists.
-  // IMPORTANT: We NEVER delete a collection here. Only removeProjectIndex
-  // (called by the codebase_remove tool) is allowed to delete collections.
-  await ensureCollection(collection);
-
-  // ── Fast-path: same-collection skip ──
-  // If this collection has prior metadata with gitBlobShas matching the
-  // current working tree exactly, the index is already up to date — skip
-  // scan + embed and just refresh the graph. Saves the bulk of the work on
-  // repeat invocations against an unchanged branch.
-  //
-  // Conditions for taking the fast path:
-  //   1. Project is a git repo (currentGitBlobShas is non-null).
-  //   2. Collection already has data + saved gitBlobShas + saved hashes.
-  //   3. Saved gitBlobShas matches current working-tree gitBlobShas exactly.
-  //
-  // Edge cases that intentionally fall through to the normal scan:
-  //   - First-time index (hasExistingData = false).
-  //   - Project not a git repo (currentGitBlobShas = null).
-  //   - Old collection saved before gitBlobShas was tracked (previous = null).
-  //   - Any file changed (gitBlobShasEqual returns false).
-  //   - Existing data but no in-memory hashes (cannot persist a complete map).
-  if (hasExistingData && currentGitBlobShas !== null && hashes.size > 0) {
-    const previousGitBlobShas = await loadProjectGitBlobShas(collection).catch(
-      () => null,
-    );
-    if (
-      previousGitBlobShas !== null &&
-      gitBlobShasEqual(previousGitBlobShas, currentGitBlobShas)
-    ) {
-      onProgress?.(
-        `Fast-path: branch unchanged since last index (${currentGitBlobShas.size} files). Skipping scan + embed.`,
-      );
-      logger.info("Same-collection fast-skip taken", {
-        collection,
-        files: currentGitBlobShas.size,
-      });
-
-      progress.phase = "building code graph";
-      try {
-        const graph = await rebuildGraph(resolvedPath);
-        onProgress?.(
-          `Code graph: ${graph.nodes.length} files, ${graph.edges.length} edges`,
-        );
-      } catch (graphErr) {
-        const graphMsg =
-          graphErr instanceof Error ? graphErr.message : String(graphErr);
-        logger.warn("Code graph build failed during fast-skip (non-fatal)", {
-          projectPath: resolvedPath,
-          error: graphMsg,
-        });
-      }
-
-      progress.phase = "saving metadata";
-      await saveProjectMetadata(
-        collection,
-        resolvedPath,
-        hashes.size,
-        hashes.size,
-        hashes,
-        "completed",
-        { gitBlobShas: currentGitBlobShas },
-      );
-
-      onProgress?.(`Indexing complete (fast-path): ${hashes.size} files, 0 chunks`);
-      lastCompleted.set(resolvedPath, {
-        type: "full-index",
-        completedAt: Date.now(),
-        durationMs: Date.now() - progress.startedAt,
-        filesProcessed: hashes.size,
-        chunksCreated: 0,
-      });
-      return { filesIndexed: hashes.size, chunksCreated: 0, cancelled: false };
-    }
-  }
-
-  if (hasExistingData) {
-    if (hashes.size > 0) {
-      onProgress?.(`Existing index found (${existingInfo?.pointsCount} chunks, ${hashes.size} file hashes), resuming...`);
-    } else {
-      // Collection has data but no hashes — likely a crash before metadata was saved,
-      // or hashes were lost. Re-embed everything but keep existing chunks to avoid
-      // destroying a partially completed index.
-      onProgress?.(`Existing index found (${existingInfo?.pointsCount} chunks, no file hashes). Re-indexing all files (existing chunks preserved)...`);
-    }
-  } else {
-    // Collection is empty or was just created — fresh start, clear any stale in-memory hashes
-    if (existingInfo === null) {
-      onProgress?.(`Setting up collection ${collection} (new)...`);
-      logger.info("Collection did not exist, created fresh", { collection });
-    } else {
-      onProgress?.(`Setting up collection ${collection} (empty, reusing)...`);
-      logger.info("Collection exists but is empty, reusing", { collection, pointsCount: existingInfo.pointsCount });
-    }
-    hashes.clear();
-  }
+  const { resolvedPath, collection, hashes, targetFiles: files, progress, onProgress, hasExistingData } = opts;
+  // `currentFileSet` represents files present on disk right now. In the
+  // full-project flow this equals `targetFiles`, so the default preserves the
+  // pre-refactor behavior. In the sibling-clone flow the caller passes the
+  // FULL set of indexable files (not just modified+added) so unchanged files
+  // — whose hashes were seeded from the cloned sibling — survive cleanup.
+  const currentFileSet = opts.currentFileSet ?? new Set(files);
 
   // ── Phase 1: Scan and chunk files ──
-  progress.phase = "scanning files";
-  const files = await getIndexableFiles(resolvedPath, extraExtensions);
-  progress.filesTotal = files.length;
-  onProgress?.(`Found ${files.length} indexable files`);
-
   interface ChunkedFile {
     relativePath: string;
     absolutePath: string;
@@ -917,6 +808,20 @@ export async function indexProject(
   if (hasExistingData) {
     onProgress?.(`${chunkedFiles.length} files changed, ${skippedCount} unchanged/skipped`);
 
+    // Defensive guard: if the caller passes (or defaults to) an empty
+    // currentFileSet alongside non-empty hashes, the cleanup loop below would
+    // delete chunks for every previously-indexed file — catastrophic data
+    // loss. The full-project flow's default (`new Set(targetFiles)`) makes
+    // this only possible when targetFiles is empty AND hashes were seeded
+    // upstream (e.g. a future caller forgetting to pass currentFileSet on
+    // the sibling-clone path). Throw rather than silently delete.
+    if (currentFileSet.size === 0 && hashes.size > 0) {
+      throw new Error(
+        `scanAndIndexFiles: refusing to run cleanup with empty currentFileSet ` +
+        `but hashes.size=${hashes.size} (would delete every prior chunk).`,
+      );
+    }
+
     // Delete old chunks for changed files
     progress.phase = "cleaning stale chunks";
     for (const file of chunkedFiles) {
@@ -925,8 +830,9 @@ export async function indexProject(
       }
     }
 
-    // Handle deleted files
-    const currentFileSet = new Set(files);
+    // Handle deleted files: any previously-indexed path that is NOT in the
+    // current working-tree set is stale and must be evicted from both the
+    // collection and the in-memory hash map.
     for (const [filePath] of hashes) {
       if (!currentFileSet.has(filePath)) {
         await deleteFileChunks(collection, filePath);
@@ -1126,8 +1032,352 @@ export async function indexProject(
     onProgress?.(`Batch ${batchNum}/${totalBatches} checkpointed (${totalChunksCreated} chunks so far)`);
   }
 
-  const filesIndexed = files.length;
-  const chunksCreated = totalChunksCreated;
+  return { filesIndexed: files.length, chunksCreated: totalChunksCreated, cancelled: false };
+}
+
+/** Full index of a project directory */
+export async function indexProject(
+  projectPath: string,
+  onProgress?: (message: string) => void,
+  extraExtensions?: Set<string>,
+): Promise<{ filesIndexed: number; chunksCreated: number; cancelled: boolean }> {
+  // Register dynamic AST grammars for AST-aware chunking
+  ensureDynamicLanguages();
+
+  const resolvedPath = path.resolve(projectPath);
+
+  // Cross-process lock: prevent two MCP instances from indexing the same project
+  const lockAcquired = await acquireProjectLock(resolvedPath, "index");
+  if (!lockAcquired) {
+    const msg = "Another process is already indexing this project, skipping";
+    logger.info(msg, { projectPath: resolvedPath });
+    onProgress?.(msg);
+    return { filesIndexed: 0, chunksCreated: 0, cancelled: false };
+  }
+
+  const progress: IndexingProgress = {
+    type: "full-index",
+    startedAt: Date.now(),
+    filesTotal: 0,
+    filesProcessed: 0,
+    phase: "setting up",
+  };
+  indexingInProgress.set(resolvedPath, progress);
+
+  try {
+  const projectId = projectIdFromPath(resolvedPath);
+  const collection = collectionName(projectId);
+  const hashes = await getProjectHashes(projectId, collection, resolvedPath);
+
+  // Snapshot the current git tree once per run. Null when the directory is
+  // not a git checkout — in that case we simply don't persist git shas and
+  // future fast-path detection silently degrades to a normal scan.
+  const currentGitBlobShas = await getGitBlobShas(resolvedPath);
+
+  // Smart re-index: check if collection already has data.
+  // getCollectionInfo now throws on transient errors (instead of returning null),
+  // so a Qdrant blip will abort the operation rather than trigger a false clean-start.
+  let existingInfo: { pointsCount: number; status: string } | null;
+  try {
+    existingInfo = await getCollectionInfo(collection);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error("Cannot determine collection state — aborting indexing to protect existing data", {
+      collection,
+      error: msg,
+    });
+    throw new Error(`Failed to check collection state for ${collection}: ${msg}. Aborting to avoid accidental data loss.`);
+  }
+  const hasExistingData = existingInfo !== null && existingInfo.pointsCount > 0;
+
+  // NOTE: ensureCollection(collection) is intentionally deferred to AFTER the
+  // sibling-clone gate below. The snapshot+recover clone primitive
+  // auto-creates the target collection from the source snapshot's schema —
+  // it requires the target NOT to exist. If we ensureCollection upfront we'd
+  // pre-create an empty target and recover would fail. On the normal-flow
+  // path (no sibling clone taken, or clone failed and we fell through) we
+  // call ensureCollection there.
+
+  // ── Fast-path: same-collection skip ──
+  // If this collection has prior metadata with gitBlobShas matching the
+  // current working tree exactly, the index is already up to date — skip
+  // scan + embed and just refresh the graph. Saves the bulk of the work on
+  // repeat invocations against an unchanged branch.
+  //
+  // Conditions for taking the fast path:
+  //   1. Project is a git repo (currentGitBlobShas is non-null).
+  //   2. Collection already has data + saved gitBlobShas + saved hashes.
+  //   3. Saved gitBlobShas matches current working-tree gitBlobShas exactly.
+  //
+  // Edge cases that intentionally fall through to the normal scan:
+  //   - First-time index (hasExistingData = false).
+  //   - Project not a git repo (currentGitBlobShas = null).
+  //   - Old collection saved before gitBlobShas was tracked (previous = null).
+  //   - Any file changed (gitBlobShasEqual returns false).
+  //   - Existing data but no in-memory hashes (cannot persist a complete map).
+  if (hasExistingData && currentGitBlobShas !== null && hashes.size > 0) {
+    const previousGitBlobShas = await loadProjectGitBlobShas(collection).catch(
+      () => null,
+    );
+    if (
+      previousGitBlobShas !== null &&
+      gitBlobShasEqual(previousGitBlobShas, currentGitBlobShas)
+    ) {
+      onProgress?.(
+        `Fast-path: branch unchanged since last index (${currentGitBlobShas.size} files). Skipping scan + embed.`,
+      );
+      logger.info("Same-collection fast-skip taken", {
+        collection,
+        files: currentGitBlobShas.size,
+      });
+
+      progress.phase = "building code graph";
+      try {
+        const graph = await rebuildGraph(resolvedPath);
+        onProgress?.(
+          `Code graph: ${graph.nodes.length} files, ${graph.edges.length} edges`,
+        );
+      } catch (graphErr) {
+        const graphMsg =
+          graphErr instanceof Error ? graphErr.message : String(graphErr);
+        logger.warn("Code graph build failed during fast-skip (non-fatal)", {
+          projectPath: resolvedPath,
+          error: graphMsg,
+        });
+      }
+
+      progress.phase = "saving metadata";
+      await saveProjectMetadata(
+        collection,
+        resolvedPath,
+        hashes.size,
+        hashes.size,
+        hashes,
+        "completed",
+        { gitBlobShas: currentGitBlobShas },
+      );
+
+      onProgress?.(`Indexing complete (fast-path): ${hashes.size} files, 0 chunks`);
+      lastCompleted.set(resolvedPath, {
+        type: "full-index",
+        completedAt: Date.now(),
+        durationMs: Date.now() - progress.startedAt,
+        filesProcessed: hashes.size,
+        chunksCreated: 0,
+      });
+      return { filesIndexed: hashes.size, chunksCreated: 0, cancelled: false };
+    }
+  }
+
+  // ── Fast-path: sibling-clone ──
+  // Bootstrapping a new (or empty) collection? Look for a sibling collection
+  // whose gitBlobShas overlap with the current working tree. If found:
+  //   1. Clone all of sibling's points into the target (~30s for 125k chunks).
+  //   2. Diff the trees (unchanged / modified / added / deleted).
+  //   3. Delete chunks for modified + deleted files (modified files re-chunk
+  //      below; explicit delete prevents stale chunks at line offsets that
+  //      no longer exist after edits).
+  //   4. Run scan + embed only on (modified + added) — most files are reused.
+  //   5. Save metadata with current gitBlobShas so future runs hit fast paths.
+  //
+  // On any error during clone, we fall through to the normal full-index path
+  // below. The collection we partially populated will be overwritten by the
+  // upsert calls in scanAndIndexFiles.
+  const collectionEmpty = !hasExistingData;
+  if (
+    collectionEmpty &&
+    currentGitBlobShas !== null &&
+    currentGitBlobShas.size > 0
+  ) {
+    const sibling = await findSiblingMetadata(
+      resolvedPath,
+      currentGitBlobShas,
+      collection,
+    ).catch((err) => {
+      logger.error("findSiblingMetadata threw", {
+        error: err instanceof Error ? err.message : String(err),
+        name: err instanceof Error ? err.name : undefined,
+        stack: err instanceof Error ? err.stack : undefined,
+      });
+      return null;
+    });
+
+    if (sibling !== null) {
+      const diff = diffGitTrees(sibling.gitBlobShas, currentGitBlobShas);
+      onProgress?.(
+        `Sibling-clone candidate: ${sibling.collectionName} (${sibling.matchCount}/${currentGitBlobShas.size} files match). ` +
+          `Diff: ${diff.unchanged.length} unchanged, ${diff.modified.length} modified, ` +
+          `${diff.added.length} added, ${diff.deleted.length} deleted.`,
+      );
+
+      try {
+        progress.phase = "cloning sibling collection";
+        const cloned = await cloneCollectionPoints(
+          sibling.collectionName,
+          collection,
+        );
+        onProgress?.(`Cloned ${cloned} points from ${sibling.collectionName}.`);
+
+        // Drop chunks for files that changed (modified) or no longer exist
+        // (deleted). Batched into a single filter delete with a path-IN
+        // clause — N round-trips → 1 — so post-clone cleanup doesn't dominate
+        // wall time when the diff is in the thousands.
+        const stalePaths = [...diff.deleted, ...diff.modified];
+        if (stalePaths.length > 0) {
+          progress.phase = "cleaning stale chunks";
+          await deleteFileChunksBatch(collection, stalePaths);
+          onProgress?.(`Pruned chunks for ${stalePaths.length} stale files.`);
+        }
+
+        // Seed `hashes` with the unchanged paths' content hashes so the scan
+        // helper's skip-by-hash short-circuit kicks in immediately for any
+        // unchanged file that does end up in the scan set.
+        for (const unchangedPath of diff.unchanged) {
+          const sha = sibling.fileHashes.get(unchangedPath);
+          if (sha !== undefined) hashes.set(unchangedPath, sha);
+        }
+
+        // Build the path subset to scan: modified + added only.
+        const subsetSet = new Set<string>([...diff.modified, ...diff.added]);
+        const allFiles = await getIndexableFiles(resolvedPath, extraExtensions);
+        const targetFiles = allFiles.filter((p) => subsetSet.has(p));
+        progress.filesTotal = allFiles.length;
+        onProgress?.(
+          `Indexing ${targetFiles.length} changed file${targetFiles.length === 1 ? "" : "s"} (${diff.unchanged.length} reused via clone).`,
+        );
+
+        const cloneResult = await scanAndIndexFiles({
+          resolvedPath,
+          collection,
+          hashes,
+          targetFiles,
+          // Pass the FULL working-tree set so the helper's stale-cleanup
+          // loop only deletes chunks for files genuinely missing from disk.
+          // Without this the loop would walk `hashes` (seeded above with
+          // diff.unchanged) and delete every unchanged path because none of
+          // them are in the targetFiles subset.
+          currentFileSet: new Set(allFiles),
+          progress,
+          onProgress,
+          // We just cloned points into the collection; treat as existing data
+          // so the helper's skip-by-hash + stale-chunk paths behave correctly.
+          hasExistingData: true,
+        });
+
+        if (cloneResult.cancelled) {
+          return cloneResult;
+        }
+
+        progress.phase = "building code graph";
+        try {
+          const graph = await rebuildGraph(resolvedPath);
+          onProgress?.(
+            `Code graph: ${graph.nodes.length} files, ${graph.edges.length} edges`,
+          );
+        } catch (graphErr) {
+          const graphMsg =
+            graphErr instanceof Error ? graphErr.message : String(graphErr);
+          logger.warn(
+            "Code graph build failed during sibling-clone (non-fatal)",
+            { projectPath: resolvedPath, error: graphMsg },
+          );
+        }
+
+        progress.phase = "saving metadata";
+        await saveProjectMetadata(
+          collection,
+          resolvedPath,
+          allFiles.length,
+          hashes.size,
+          hashes,
+          "completed",
+          { gitBlobShas: currentGitBlobShas },
+        );
+
+        const totalFilesIndexed =
+          cloneResult.filesIndexed + diff.unchanged.length;
+        onProgress?.(
+          `Indexing complete (sibling-clone): ${totalFilesIndexed} files, ${cloneResult.chunksCreated} chunks`,
+        );
+        lastCompleted.set(resolvedPath, {
+          type: "full-index",
+          completedAt: Date.now(),
+          durationMs: Date.now() - progress.startedAt,
+          filesProcessed: totalFilesIndexed,
+          chunksCreated: cloneResult.chunksCreated,
+        });
+        return {
+          filesIndexed: totalFilesIndexed,
+          chunksCreated: cloneResult.chunksCreated,
+          cancelled: false,
+        };
+      } catch (cloneErr) {
+        logger.warn(
+          "Sibling-clone fast path failed; falling through to full index",
+          {
+            sibling: sibling.collectionName,
+            error: cloneErr instanceof Error ? cloneErr.message : String(cloneErr),
+          },
+        );
+        // Recover may have left no target collection at all OR a partial
+        // one (e.g. snapshot succeeded, recover started, then errored
+        // mid-stream). Drop whatever's there before falling through to the
+        // normal flow so ensureCollection below can recreate a clean,
+        // empty collection with the expected schema.
+        await deleteCollection(collection).catch(() => {});
+        // Fall through to normal flow below.
+      }
+    }
+  }
+
+  // Normal-flow path: no sibling-clone taken (or clone failed and we fell
+  // through). Ensure the target collection exists with the right schema
+  // before scan + embed. Idempotent — no-op if the collection already exists.
+  await ensureCollection(collection);
+
+  if (hasExistingData) {
+    if (hashes.size > 0) {
+      onProgress?.(`Existing index found (${existingInfo?.pointsCount} chunks, ${hashes.size} file hashes), resuming...`);
+    } else {
+      // Collection has data but no hashes — likely a crash before metadata was saved,
+      // or hashes were lost. Re-embed everything but keep existing chunks to avoid
+      // destroying a partially completed index.
+      onProgress?.(`Existing index found (${existingInfo?.pointsCount} chunks, no file hashes). Re-indexing all files (existing chunks preserved)...`);
+    }
+  } else {
+    // Collection is empty or was just created — fresh start, clear any stale in-memory hashes
+    if (existingInfo === null) {
+      onProgress?.(`Setting up collection ${collection} (new)...`);
+      logger.info("Collection did not exist, created fresh", { collection });
+    } else {
+      onProgress?.(`Setting up collection ${collection} (empty, reusing)...`);
+      logger.info("Collection exists but is empty, reusing", { collection, pointsCount: existingInfo.pointsCount });
+    }
+    hashes.clear();
+  }
+
+  // ── Phase 1: Scan and chunk files ──
+  progress.phase = "scanning files";
+  const files = await getIndexableFiles(resolvedPath, extraExtensions);
+  progress.filesTotal = files.length;
+  onProgress?.(`Found ${files.length} indexable files`);
+
+  const scanResult = await scanAndIndexFiles({
+    resolvedPath,
+    collection,
+    hashes,
+    targetFiles: files,
+    progress,
+    onProgress,
+    hasExistingData,
+  });
+
+  if (scanResult.cancelled) {
+    return scanResult;
+  }
+
+  const filesIndexed = scanResult.filesIndexed;
+  const chunksCreated = scanResult.chunksCreated;
 
   // Final metadata save
   progress.phase = "saving metadata";
