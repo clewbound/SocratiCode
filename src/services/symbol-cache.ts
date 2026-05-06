@@ -24,6 +24,19 @@ export const SYMBOL_CACHE_COLLECTION = "socraticode_symbol_cache";
  */
 export const SYMBOL_CACHE_SCHEMA_VERSION = 1;
 
+/** Maximum number of cache entries to upsert in a single Qdrant request.
+ *  A single payload can contain hundreds of symbols + raw call sites, easily
+ *  reaching ~1-2KB serialized. At 18k+ entries that's 25-35MB in one request,
+ *  which Qdrant (or its ingress) rejects with `Bad Request` once we exceed
+ *  the body-size limit. 500 keeps each chunk roughly ≤1MB even for files with
+ *  unusually dense symbol output, and the per-chunk overhead is tiny relative
+ *  to the rest of buildCodeGraph.
+ *
+ *  Each chunk is independent — failures don't roll back earlier successful
+ *  chunks (matches the existing best-effort "continue without cache"
+ *  semantics). */
+export const SYMBOL_CACHE_WRITE_BATCH_SIZE = 500;
+
 /** What we store/retrieve per `(language, blobSha)` slot. */
 export interface CachedSymbolEntry {
   lang: string;
@@ -116,22 +129,32 @@ export async function lookupSymbolCacheBatch(
   return result;
 }
 
-/** Bulk write: upsert many extracted-symbol entries in a single Qdrant call.
+/** Bulk write: upsert many extracted-symbol entries into Qdrant.
  *  Best-effort: any failure is logged and swallowed so cache writes never
  *  break indexing. Uses `wait: false` because callers don't depend on the
  *  write being durable before returning — a missed write just means the next
- *  rebuild does another miss. */
+ *  rebuild does another miss.
+ *
+ *  Chunked at {@link SYMBOL_CACHE_WRITE_BATCH_SIZE} per request because a
+ *  single 18k-entry upsert can serialize to 25-35MB and exceed Qdrant's
+ *  body-size limit (returns 400 Bad Request). Each chunk is awaited
+ *  independently — a single failed chunk only loses that slice of the cache
+ *  rather than the whole write. */
 export async function writeSymbolCacheBatch(entries: CachedSymbolEntry[]): Promise<void> {
   if (entries.length === 0) return;
+
+  // Build the deduped point set up-front so we can both ensure-once and
+  // chunk a stable list. ensureSymbolCacheCollection is the only step that
+  // can fail before any chunk is sent; we still treat it as best-effort.
+  let points: Array<{ id: string; vector: number[]; payload: Record<string, unknown> }>;
   try {
     await ensureSymbolCacheCollection();
-    const client = getClient();
 
     // Dedupe by point id so a single batch with two files sharing a blob sha
     // doesn't upsert the same point twice (Qdrant accepts it but it's wasted
     // work and could surface as a "duplicate id" warning depending on server).
     const seen = new Set<string>();
-    const points: Array<{ id: string; vector: number[]; payload: Record<string, unknown> }> = [];
+    points = [];
     const storedAt = new Date().toISOString();
     for (const entry of entries) {
       const id = pointId(symbolCacheKey(entry.lang, entry.blobSha));
@@ -149,12 +172,41 @@ export async function writeSymbolCacheBatch(entries: CachedSymbolEntry[]): Promi
       points.push({ id, vector: [0], payload: payload as unknown as Record<string, unknown> });
     }
     if (points.length === 0) return;
-
-    await client.upsert(SYMBOL_CACHE_COLLECTION, { wait: false, points });
   } catch (err) {
     logger.warn("symbol cache batch put failed (continuing without cache)", {
       count: entries.length,
       error: err instanceof Error ? err.message : String(err),
+    });
+    return;
+  }
+
+  const client = getClient();
+  const totalChunks = Math.ceil(points.length / SYMBOL_CACHE_WRITE_BATCH_SIZE);
+  let chunksWritten = 0;
+  let failedChunks = 0;
+  let firstError: string | null = null;
+  for (let i = 0; i < points.length; i += SYMBOL_CACHE_WRITE_BATCH_SIZE) {
+    const chunk = points.slice(i, i + SYMBOL_CACHE_WRITE_BATCH_SIZE);
+    try {
+      await client.upsert(SYMBOL_CACHE_COLLECTION, { wait: false, points: chunk });
+      chunksWritten++;
+    } catch (err) {
+      failedChunks++;
+      if (firstError === null) {
+        firstError = err instanceof Error ? err.message : String(err);
+      }
+      // Continue to the next chunk: best-effort, partial cache is still
+      // useful and a transient failure on chunk N shouldn't drop chunk N+1.
+    }
+  }
+
+  if (failedChunks > 0) {
+    logger.warn("symbol cache batch put: some chunks failed (continuing without cache)", {
+      totalChunks,
+      chunksWritten,
+      failedChunks,
+      pointCount: points.length,
+      firstError,
     });
   }
 }

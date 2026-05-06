@@ -29,6 +29,7 @@ import {
   lookupSymbolCacheBatch,
   SYMBOL_CACHE_COLLECTION,
   SYMBOL_CACHE_SCHEMA_VERSION,
+  SYMBOL_CACHE_WRITE_BATCH_SIZE,
   symbolCacheKey,
   writeSymbolCacheBatch,
 } from "../../src/services/symbol-cache.js";
@@ -279,5 +280,50 @@ describe("writeSymbolCacheBatch", () => {
     await writeSymbolCacheBatch([]);
     expect(mockEnsure).not.toHaveBeenCalled();
     expect(mockUpsert).not.toHaveBeenCalled();
+  });
+
+  it("chunks large batches into multiple upsert calls", async () => {
+    const totalEntries = SYMBOL_CACHE_WRITE_BATCH_SIZE * 2 + 17;
+    const entries = Array.from({ length: totalEntries }, (_, i) => ({
+      lang: "typescript",
+      blobSha: `h-${i.toString(16).padStart(8, "0")}`,
+      symbols: [],
+      rawCalls: [],
+      imports: [],
+    }));
+
+    await writeSymbolCacheBatch(entries);
+
+    const expectedCalls = Math.ceil(totalEntries / SYMBOL_CACHE_WRITE_BATCH_SIZE);
+    expect(mockUpsert).toHaveBeenCalledTimes(expectedCalls);
+    let total = 0;
+    for (const call of mockUpsert.mock.calls) {
+      const body = call[1];
+      expect(body.points.length).toBeLessThanOrEqual(SYMBOL_CACHE_WRITE_BATCH_SIZE);
+      total += body.points.length;
+    }
+    expect(total).toBe(totalEntries);
+  });
+
+  it("continues writing remaining chunks when one chunk fails", async () => {
+    const totalEntries = SYMBOL_CACHE_WRITE_BATCH_SIZE * 3;
+    const entries = Array.from({ length: totalEntries }, (_, i) => ({
+      lang: "typescript",
+      blobSha: `h-${i.toString(16).padStart(8, "0")}`,
+      symbols: [],
+      rawCalls: [],
+      imports: [],
+    }));
+
+    // Reject the second chunk, accept the first and third.
+    let call = 0;
+    mockUpsert.mockImplementation(async () => {
+      call++;
+      if (call === 2) throw new Error("Bad Request");
+      return undefined;
+    });
+
+    await expect(writeSymbolCacheBatch(entries)).resolves.toBeUndefined();
+    expect(mockUpsert).toHaveBeenCalledTimes(3);
   });
 });
