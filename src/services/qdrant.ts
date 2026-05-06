@@ -612,6 +612,48 @@ async function ensureMetadataCollection(): Promise<void> {
   metadataCollectionReady = true;
 }
 
+// ── Embedding cache collection ───────────────────────────────────────────
+
+const EMBEDDING_CACHE_COLLECTION = "socraticode_embedding_cache";
+
+/** Cached flag: once the embedding cache collection is confirmed to exist, skip re-checking */
+let embeddingCacheCollectionReady = false;
+
+/** Reset the embedding cache collection readiness cache (for testing only) */
+export function resetEmbeddingCacheCollectionCache(): void {
+  embeddingCacheCollectionReady = false;
+}
+
+/** Ensure the embedding cache collection exists (idempotent, cached after first success).
+ *  The collection stores (chunks, vectors) keyed by content hash + model + dimensions
+ *  and is never searched, so it uses a 1-dim dummy vector (Qdrant requires vectors).
+ *  Handles concurrent creation: the indexer's per-file scan calls this in parallel
+ *  via Promise.all, so multiple callers can race past the existence check. We swallow
+ *  the resulting "Conflict" / "already exists" error since either outcome leaves the
+ *  collection in the same usable state. */
+export async function ensureEmbeddingCacheCollection(): Promise<void> {
+  if (embeddingCacheCollectionReady) return;
+
+  const qdrant = getClient();
+  const collections = await qdrant.getCollections();
+  const exists = collections.collections.some((c) => c.name === EMBEDDING_CACHE_COLLECTION);
+  if (!exists) {
+    try {
+      await qdrant.createCollection(EMBEDDING_CACHE_COLLECTION, {
+        vectors: { size: 1, distance: "Cosine" },
+        on_disk_payload: true,
+      });
+      logger.info("Created embedding cache collection");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!/already exists|conflict/i.test(msg)) throw err;
+      // Another concurrent caller created it — that's fine.
+    }
+  }
+
+  embeddingCacheCollectionReady = true;
+}
+
 /** Generate a stable UUID from a collection name (for Qdrant point ID).
  *  Uses SHA-256 to avoid collision risk inherent in simpler hashes (e.g. djb2). */
 function metadataPointId(collName: string): string {
