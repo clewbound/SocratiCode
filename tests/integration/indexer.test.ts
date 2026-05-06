@@ -15,7 +15,7 @@ import {
   updateProjectIndex,
 } from "../../src/services/indexer.js";
 import { ensureOllamaReady } from "../../src/services/ollama.js";
-import { getCollectionInfo, searchChunks } from "../../src/services/qdrant.js";
+import { deleteCollection, getCollectionInfo, searchChunks } from "../../src/services/qdrant.js";
 import {
   addFileToFixture,
   createFixtureProject,
@@ -256,4 +256,92 @@ export function handleWebhook(payload: unknown): { status: string } {
       expect(info).toBeNull();
     });
   });
+});
+
+describe.skipIf(!dockerAvailable)("indexer service — embedding cache", () => {
+  let cacheFixture: FixtureProject;
+  const cacheCollName = "socraticode_embedding_cache";
+  const populateProjectId = "indexer-cache-populate";
+  const reuseProjectId = "indexer-cache-reuse";
+
+  beforeAll(async () => {
+    await ensureQdrantReady();
+    await ensureOllamaReady();
+    await waitForQdrant();
+    await waitForOllama();
+
+    cacheFixture = createFixtureProject("indexer-cache-test");
+    process.env.SOCRATICODE_EMBEDDING_CACHE = "true";
+
+    // Start with a clean cache collection so test assertions about growth are
+    // deterministic.
+    try {
+      await deleteCollection(cacheCollName);
+    } catch {
+      // ignore — collection may not exist yet
+    }
+  });
+
+  afterAll(async () => {
+    delete process.env.SOCRATICODE_EMBEDDING_CACHE;
+
+    // Clean up the sibling project collections we created.
+    for (const projectId of [populateProjectId, reuseProjectId]) {
+      process.env.SOCRATICODE_PROJECT_ID = projectId;
+      try {
+        await removeProjectIndex(cacheFixture.root);
+      } catch {
+        // ignore
+      }
+    }
+    delete process.env.SOCRATICODE_PROJECT_ID;
+
+    try {
+      await deleteCollection(cacheCollName);
+    } catch {
+      // ignore
+    }
+
+    cacheFixture.cleanup();
+  });
+
+  it(
+    "populates the shared cache on a fresh index",
+    async () => {
+      process.env.SOCRATICODE_PROJECT_ID = populateProjectId;
+      const result = await indexProject(cacheFixture.root);
+      expect(result.chunksCreated).toBeGreaterThan(0);
+
+      const cacheInfo = await getCollectionInfo(cacheCollName);
+      expect(cacheInfo).not.toBeNull();
+      expect(cacheInfo?.pointsCount).toBeGreaterThan(0);
+    },
+    180_000,
+  );
+
+  it(
+    "reuses cached vectors when indexing a sibling collection on identical content",
+    async () => {
+      const cacheBefore = (await getCollectionInfo(cacheCollName))?.pointsCount ?? 0;
+      expect(cacheBefore).toBeGreaterThan(0);
+
+      // Same fixture content, different project ID → fresh per-collection
+      // skip-by-hash state forces a re-index, but the shared cache should
+      // catch every file.
+      process.env.SOCRATICODE_PROJECT_ID = reuseProjectId;
+      const messages: string[] = [];
+      const result = await indexProject(cacheFixture.root, (m) => messages.push(m));
+      expect(result.chunksCreated).toBeGreaterThan(0);
+
+      // Cache point count must not grow — every file was a hit.
+      const cacheAfter = (await getCollectionInfo(cacheCollName))?.pointsCount ?? 0;
+      expect(cacheAfter).toBe(cacheBefore);
+
+      // The indexer should advertise the cache hit in its progress messages.
+      expect(
+        messages.some((m) => m.includes("reused from shared cache")),
+      ).toBe(true);
+    },
+    180_000,
+  );
 });

@@ -21,6 +21,7 @@ import {
 import type { FileChunk } from "../types.js";
 import { ensureDynamicLanguages, getAstGrepLang, rebuildGraph, removeGraph } from "./code-graph.js";
 import { ensureArtifactsIndexed, loadConfig, removeAllArtifacts } from "./context-artifacts.js";
+import { type CachedEmbedding, lookupEmbeddings, putEmbedding } from "./embedding-cache.js";
 import { generateEmbeddings, prepareDocumentText } from "./embeddings.js";
 import { createIgnoreFilter, shouldIgnore } from "./ignore.js";
 import { acquireProjectLock, releaseProjectLock } from "./lock.js";
@@ -729,15 +730,35 @@ export async function indexProject(
     absolutePath: string;
     contentHash: string;
     chunks: FileChunk[];
+    // When non-null, vectors came from the shared embedding cache and the embed
+    // phase can skip the Ollama call for these chunks. The array length matches
+    // chunks.length and each vector aligns positionally with its chunk.
+    cachedVectors: number[][] | null;
   }
 
+  const cacheEnabled = process.env.SOCRATICODE_EMBEDDING_CACHE === "true";
   const chunkedFiles: ChunkedFile[] = [];
   let skippedCount = 0;
+  let cacheHits = 0;
+
+  // Per-file scan candidate: a file that survived stat+read+skip-by-hash and
+  // is ready for cache lookup or fresh chunking. `null` means the file was
+  // skipped (oversized, unchanged, or read error) and should not be processed
+  // further in this batch.
+  type ScanCandidate = {
+    relativePath: string;
+    absolutePath: string;
+    content: string;
+    contentHash: string;
+  };
 
   for (let i = 0; i < files.length; i += FILE_SCAN_BATCH) {
     const batch = files.slice(i, i + FILE_SCAN_BATCH);
-    const results = await Promise.all(
-      batch.map(async (relativePath): Promise<ChunkedFile | null> => {
+
+    // Phase 1: parallel stat + read + hash. Skip oversized, unchanged, and
+    // read-error files here so they never reach the bulk cache lookup.
+    const scanned: Array<ScanCandidate | null> = await Promise.all(
+      batch.map(async (relativePath): Promise<ScanCandidate | null> => {
         const absolutePath = path.join(resolvedPath, relativePath);
         try {
           const stat = await fsp.stat(absolutePath);
@@ -753,19 +774,53 @@ export async function indexProject(
             return null;
           }
 
-          const chunks = chunkFileContent(absolutePath, relativePath, content);
-          return { relativePath, absolutePath, contentHash, chunks };
+          return { relativePath, absolutePath, content, contentHash };
         } catch {
           return null;
         }
       }),
     );
 
-    for (const r of results) {
-      if (r) chunkedFiles.push(r);
+    const candidates: ScanCandidate[] = [];
+    for (const s of scanned) {
+      if (s) candidates.push(s);
       else skippedCount++;
     }
+
+    // Phase 2: one bulk cache lookup for the whole batch. This collapses what
+    // used to be FILE_SCAN_BATCH separate Qdrant retrieve round-trips into a
+    // single retrieve call per outer batch.
+    let cachedByHash: Map<string, CachedEmbedding> = new Map();
+    if (cacheEnabled && candidates.length > 0) {
+      cachedByHash = await lookupEmbeddings(candidates.map((c) => c.contentHash));
+    }
+
+    // Phase 3: assemble ChunkedFile entries. On a cache hit, reuse cached
+    // chunks + vectors so chunk IDs and line ranges stay stable across
+    // collections. On a miss, fall through to fresh chunking; the embed phase
+    // will handle the Ollama call.
+    for (const { relativePath, absolutePath, content, contentHash } of candidates) {
+      const cached = cachedByHash.get(contentHash);
+      if (cached) {
+        chunkedFiles.push({
+          relativePath,
+          absolutePath,
+          contentHash,
+          chunks: cached.chunks,
+          cachedVectors: cached.vectors,
+        });
+        cacheHits++;
+        continue;
+      }
+      const chunks = chunkFileContent(absolutePath, relativePath, content);
+      chunkedFiles.push({ relativePath, absolutePath, contentHash, chunks, cachedVectors: null });
+    }
+
     progress.filesProcessed = Math.min(i + batch.length, files.length);
+  }
+
+  if (cacheEnabled && cacheHits > 0) {
+    onProgress?.(`Embedding cache: ${cacheHits}/${chunkedFiles.length} files reused from shared cache`);
   }
 
   if (hasExistingData) {
@@ -823,11 +878,28 @@ export async function indexProject(
     const fileBatch = chunkedFiles.slice(batchIdx, batchIdx + INDEX_BATCH_SIZE);
     const batchNum = Math.floor(batchIdx / INDEX_BATCH_SIZE) + 1;
 
-    // Collect chunks for this file batch
-    const batchChunkData: Array<{ chunk: FileChunk; contentHash: string; absolutePath: string }> = [];
-    for (const file of fileBatch) {
-      for (const chunk of file.chunks) {
-        batchChunkData.push({ chunk, contentHash: file.contentHash, absolutePath: file.absolutePath });
+    // Collect chunks for this file batch. fileIdx records which file in
+    // fileBatch each chunk belongs to so we can group freshly-embedded
+    // vectors back by file when populating the shared cache below.
+    const batchChunkData: Array<{
+      chunk: FileChunk;
+      contentHash: string;
+      absolutePath: string;
+      cachedVector: number[] | null;
+      fileIdx: number;
+    }> = [];
+    for (let fIdx = 0; fIdx < fileBatch.length; fIdx++) {
+      const file = fileBatch[fIdx];
+      for (let cIdx = 0; cIdx < file.chunks.length; cIdx++) {
+        const chunk = file.chunks[cIdx];
+        const cachedVector = file.cachedVectors ? file.cachedVectors[cIdx] : null;
+        batchChunkData.push({
+          chunk,
+          contentHash: file.contentHash,
+          absolutePath: file.absolutePath,
+          cachedVector,
+          fileIdx: fIdx,
+        });
       }
     }
 
@@ -836,22 +908,59 @@ export async function indexProject(
       continue;
     }
 
-    // Generate embeddings for this batch
-    progress.phase = `generating embeddings (batch ${batchNum}/${totalBatches})`;
-    onProgress?.(`Batch ${batchNum}/${totalBatches}: generating embeddings for ${batchChunkData.length} chunks (${fileBatch.length} files)...`);
+    // BM25 sparse text is needed for every chunk (cached or fresh) to populate
+    // Qdrant's sparse index alongside the dense vector.
+    const batchBm25Texts = batchChunkData.map((c) =>
+      prepareDocumentText(c.chunk.content, c.chunk.relativePath),
+    );
 
-    const batchTexts = batchChunkData.map((c) => prepareDocumentText(c.chunk.content, c.chunk.relativePath));
-    const batchEmbeddings = await generateEmbeddings(batchTexts, (processed) => {
-      progress.chunksProcessed = globalChunksProcessed + processed;
-    });
+    // Embed only the cache-miss chunks; cache-hit chunks short-circuit Ollama.
+    const uncachedIndices: number[] = [];
+    const uncachedTexts: string[] = [];
+    for (let i = 0; i < batchChunkData.length; i++) {
+      if (batchChunkData[i].cachedVector === null) {
+        uncachedIndices.push(i);
+        uncachedTexts.push(batchBm25Texts[i]);
+      }
+    }
+
+    progress.phase = `generating embeddings (batch ${batchNum}/${totalBatches})`;
+    if (uncachedTexts.length === 0) {
+      onProgress?.(`Batch ${batchNum}/${totalBatches}: ${batchChunkData.length} chunks (${fileBatch.length} files) all served from cache, skipping Ollama...`);
+    } else if (uncachedTexts.length < batchChunkData.length) {
+      const skipped = batchChunkData.length - uncachedTexts.length;
+      onProgress?.(`Batch ${batchNum}/${totalBatches}: generating embeddings for ${uncachedTexts.length} chunks (${skipped} cached) across ${fileBatch.length} files...`);
+    } else {
+      onProgress?.(`Batch ${batchNum}/${totalBatches}: generating embeddings for ${batchChunkData.length} chunks (${fileBatch.length} files)...`);
+    }
+
+    let newEmbeddings: number[][] = [];
+    if (uncachedTexts.length > 0) {
+      newEmbeddings = await generateEmbeddings(uncachedTexts, (processed) => {
+        progress.chunksProcessed = globalChunksProcessed + processed;
+      });
+    }
+
+    // Stitch cached + freshly-embedded vectors back into the chunk order.
+    const batchVectors: number[][] = new Array(batchChunkData.length);
+    let uncachedPos = 0;
+    for (let i = 0; i < batchChunkData.length; i++) {
+      const c = batchChunkData[i];
+      if (c.cachedVector !== null) {
+        batchVectors[i] = c.cachedVector;
+      } else {
+        batchVectors[i] = newEmbeddings[uncachedPos];
+        uncachedPos++;
+      }
+    }
     globalChunksProcessed += batchChunkData.length;
 
     // Upsert this batch to Qdrant
     progress.phase = `storing index (batch ${batchNum}/${totalBatches})`;
     const batchPoints = batchChunkData.map((c, i) => ({
       id: c.chunk.id,
-      vector: batchEmbeddings[i],
-      bm25Text: batchTexts[i],
+      vector: batchVectors[i],
+      bm25Text: batchBm25Texts[i],
       payload: {
         filePath: c.chunk.filePath,
         relativePath: c.chunk.relativePath,
@@ -881,6 +990,29 @@ export async function indexProject(
         `Qdrant upsert: all ${batchPoints.length} points in batch ${batchNum}/${totalBatches} ` +
         `were skipped (collection=${collection}). The collection may have been deleted externally.`
       );
+    }
+
+    // Populate the shared embedding cache with vectors we just computed so
+    // future indexes of files with identical content hashes can skip Ollama.
+    // Only files that came in as cache misses get written back.
+    if (cacheEnabled) {
+      const vectorsByFileIdx = new Map<number, number[][]>();
+      for (let i = 0; i < batchChunkData.length; i++) {
+        const fIdx = batchChunkData[i].fileIdx;
+        let bucket = vectorsByFileIdx.get(fIdx);
+        if (!bucket) {
+          bucket = [];
+          vectorsByFileIdx.set(fIdx, bucket);
+        }
+        bucket.push(batchVectors[i]);
+      }
+      for (let fIdx = 0; fIdx < fileBatch.length; fIdx++) {
+        const file = fileBatch[fIdx];
+        if (file.cachedVectors !== null) continue;
+        const fileVectors = vectorsByFileIdx.get(fIdx);
+        if (!fileVectors || fileVectors.length !== file.chunks.length) continue;
+        await putEmbedding(file.contentHash, { chunks: file.chunks, vectors: fileVectors });
+      }
     }
 
     // Update hashes for this batch's files
