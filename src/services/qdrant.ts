@@ -2,7 +2,12 @@
 // Copyright (C) 2026 Giancarlo Erra - Altaire Limited
 import { createHash } from "node:crypto";
 import { QdrantClient } from "@qdrant/js-client-rest";
-import { projectIdFromPath } from "../config.js";
+import {
+  projectIdFromPath,
+  symgraphFileCollectionName,
+  symgraphIndexCollectionName,
+  symgraphMetaCollectionName,
+} from "../config.js";
 import { QDRANT_API_KEY, QDRANT_HOST, QDRANT_PORT, QDRANT_URL, resolveQdrantPort } from "../constants.js";
 import type { ArtifactIndexState, CodeGraph, FileChunk, SearchResult } from "../types.js";
 import { getEmbeddingConfig } from "./embedding-config.js";
@@ -311,20 +316,41 @@ type CollectionInfoResponse = Awaited<ReturnType<QdrantClient["getCollection"]>>
 async function probeWriteReadiness(target: string, sourceInfo: CollectionInfoResponse): Promise<void> {
   const qdrant = getClient();
   const vectorsConfig = sourceInfo.config?.params?.vectors;
-  // VectorsConfig is a union of single-vector params and a dictionary; the
-  // recovered collection here always has a named "dense" entry (we created
-  // the source via `ensureCollection` which only emits the dictionary form).
-  const denseConfig = (vectorsConfig as Record<string, { size?: number } | undefined> | undefined)?.dense;
-  const denseDim = denseConfig?.size;
-  if (typeof denseDim !== "number") {
-    throw new Error(`probeWriteReadiness: source dense vector dim missing (target=${target})`);
+
+  // Two collection shapes flow through clone:
+  //   1. **Codebase chunks** — named `dense` (size N) + sparse `bm25`.
+  //   2. **Symgraph dummies** — single unnamed `{ size: 1, distance: ... }`,
+  //      no sparse vectors. Used as KV stores keyed by point id.
+  // The probe vector must match the source's schema or the upsert fails.
+  type ProbeVector = number[] | { dense: number[]; bm25: { indices: number[]; values: number[] } };
+  let probeVector: ProbeVector;
+  if (
+    vectorsConfig != null &&
+    typeof vectorsConfig === "object" &&
+    "size" in vectorsConfig &&
+    typeof (vectorsConfig as { size?: unknown }).size === "number"
+  ) {
+    // Single unnamed vector (symgraph-shape).
+    const dim = (vectorsConfig as { size: number }).size;
+    probeVector = new Array<number>(dim).fill(0);
+  } else {
+    // Named-vector dictionary; require a `dense` entry. `bm25` is sparse-only,
+    // raw `{indices,values}` bypasses server-side BM25 inference warm-up.
+    const denseConfig = (vectorsConfig as Record<string, { size?: number } | undefined> | undefined)?.dense;
+    const denseDim = denseConfig?.size;
+    if (typeof denseDim !== "number") {
+      throw new Error(`probeWriteReadiness: source dense vector dim missing (target=${target})`);
+    }
+    probeVector = {
+      dense: new Array<number>(denseDim).fill(0),
+      bm25: { indices: [0], values: [0] },
+    };
   }
 
   // Sentinel ID is randomized per call so concurrent probes don't collide.
   // The all-zero leading bytes keep it visually distinct from sha256-derived
   // chunk IDs — easy to recognize in logs/inspection.
   const probeId = `00000000-0000-0000-0000-${Math.floor(Math.random() * 0xffffffffffff).toString(16).padStart(12, "0")}`;
-  const denseVector = new Array<number>(denseDim).fill(0);
 
   const deadline = Date.now() + PROBE_TIMEOUT_MS;
   let lastErr: unknown = null;
@@ -336,13 +362,7 @@ async function probeWriteReadiness(target: string, sourceInfo: CollectionInfoRes
         points: [
           {
             id: probeId,
-            vector: {
-              dense: denseVector,
-              // Raw sparse {indices, values} bypasses Qdrant's server-side
-              // BM25 inference engine, which has its own warm-up cost. We
-              // just need to prove the write path accepts a point.
-              bm25: { indices: [0], values: [0] },
-            },
+            vector: probeVector,
             payload: { _socraticode_probe: true },
           },
         ],
@@ -487,6 +507,77 @@ export async function cloneCollectionPoints(source: string, target: string): Pro
       });
     });
   }
+}
+
+/** Drop the target if it exists, then `cloneCollectionPoints`. The clone
+ *  primitive (snapshot+recover) requires the target NOT to exist; this helper
+ *  collapses the common "drop-then-clone" pattern needed when fast-pathing a
+ *  fresh sibling clone over a possibly-stale per-branch collection (e.g.
+ *  symgraph collections that auto-exist from a previous run). Returns the
+ *  number of points cloned. */
+export async function replaceCollectionFromSibling(
+  source: string,
+  target: string,
+): Promise<number> {
+  await deleteCollection(target).catch((err) => {
+    logger.warn("replaceCollectionFromSibling: pre-clone delete failed (continuing)", {
+      target,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  });
+  return cloneCollectionPoints(source, target);
+}
+
+/** Copy the codegraph metadata point from `sourceGraphCollName` to
+ *  `targetGraphCollName`, rewriting `projectPath` and overwriting `gitBlobShas`
+ *  with caller-supplied values. The graph payload (`graphData`, node/edge
+ *  counts, lastBuiltAt) is carried over verbatim. Returns true on success,
+ *  false when the source point is missing. Throws on Qdrant errors so callers
+ *  can fall through to a fresh rebuild. */
+export async function cloneGraphMetadataPoint(
+  sourceGraphCollName: string,
+  targetGraphCollName: string,
+  opts: { projectPath: string; gitBlobShas: Map<string, string> },
+): Promise<boolean> {
+  await ensureMetadataCollection();
+  const qdrant = getClient();
+  const sourceId = metadataPointId(sourceGraphCollName);
+  const targetId = metadataPointId(targetGraphCollName);
+
+  const points = await qdrant.retrieve(METADATA_COLLECTION, {
+    ids: [sourceId],
+    with_payload: true,
+  });
+  if (points.length === 0) return false;
+  const sourcePayload = points[0].payload ?? {};
+
+  const blobObj: Record<string, string> = {};
+  for (const [k, v] of opts.gitBlobShas) {
+    blobObj[k] = v;
+  }
+
+  const payload: Record<string, unknown> = {
+    ...sourcePayload,
+    collectionName: targetGraphCollName,
+    projectPath: opts.projectPath,
+    gitBlobShas: JSON.stringify(blobObj),
+  };
+
+  // wait:true so a follow-up `isGraphFresh` / `loadGraphGitBlobShas` read in
+  // the same indexer pass sees the cloned shas. Without it, the upsert
+  // returns as soon as the request is queued and the read can race the WAL.
+  await qdrant.upsert(METADATA_COLLECTION, {
+    wait: true,
+    points: [{ id: targetId, vector: [0], payload }],
+  });
+
+  logger.info("Cloned codegraph metadata point", {
+    source: sourceGraphCollName,
+    target: targetGraphCollName,
+    nodes: sourcePayload.nodeCount,
+    edges: sourcePayload.edgeCount,
+  });
+  return true;
 }
 
 /** Delete all chunks for a specific file (matched by relativePath).
@@ -1003,6 +1094,13 @@ export interface SiblingMetadata {
   fileHashes: Map<string, string>;
   gitBlobShas: Map<string, string>;
   matchCount: number;
+  /** True when the sibling has all the auxiliary state needed to fully
+   *  short-circuit graph rebuild on a zero-diff clone: a codegraph metadata
+   *  point and all three symgraph collections (`_symgraph_meta`,
+   *  `_symgraph_file`, `_symgraph_index`). When false, callers should fall
+   *  back to `rebuildGraph` after the codebase clone — partial sibling state
+   *  can come from older or interrupted indexes. */
+  hasCompleteGraphState: boolean;
 }
 
 /** Find the sibling codebase collection whose stored gitBlobShas overlap most
@@ -1045,6 +1143,7 @@ export async function findSiblingMetadata(
   const branchPrefix = `${baseName}__`;
 
   const { collections } = await qdrant.getCollections();
+  const allCollNames = new Set(collections.map((c) => c.name));
   const candidateCollNames = collections
     .map((c) => c.name)
     .filter(
@@ -1071,8 +1170,20 @@ export async function findSiblingMetadata(
     with_payload: ["gitBlobShas", "fileHashes"],
   });
 
-  let bestMatch = -1;
-  let best: SiblingMetadata | null = null;
+  // Collect all viable candidates, then pick the best by (matchCount,
+  // hasCompleteGraphState) lexicographically. Tie-breaking on graph state
+  // avoids picking a sibling whose `_symgraph_meta` etc. were never persisted
+  // (older or interrupted indexes), which would force a `rebuildGraph`
+  // fallback even when another candidate has identical blob overlap and
+  // complete state.
+  interface ScoredCandidate {
+    collectionName: string;
+    fileHashes: Map<string, string>;
+    gitBlobShas: Map<string, string>;
+    matchCount: number;
+    hasCompleteGraphState: boolean;
+  }
+  const scored: ScoredCandidate[] = [];
 
   for (const point of points) {
     const collName = idToColl.get(String(point.id));
@@ -1092,23 +1203,50 @@ export async function findSiblingMetadata(
     for (const [path, sha] of currentBlobShas) {
       if (blobs.get(path) === sha) matchCount++;
     }
+    if (matchCount === 0) continue;
 
-    if (matchCount > bestMatch) {
-      const hashesRaw = payload?.fileHashes;
-      let fileHashes = new Map<string, string>();
-      if (typeof hashesRaw === "string") {
-        try {
-          fileHashes = new Map(Object.entries(JSON.parse(hashesRaw) as Record<string, string>));
-        } catch {
-          continue;
-        }
+    const hashesRaw = payload?.fileHashes;
+    let fileHashes = new Map<string, string>();
+    if (typeof hashesRaw === "string") {
+      try {
+        fileHashes = new Map(Object.entries(JSON.parse(hashesRaw) as Record<string, string>));
+      } catch {
+        continue;
       }
-      bestMatch = matchCount;
-      best = { collectionName: collName, fileHashes, gitBlobShas: blobs, matchCount };
     }
+
+    // Graph state is "complete" when all three symgraph collections exist
+    // alongside the codebase collection. The three symgraphs are written
+    // together with the codegraph metadata point in `doRebuildGraph`, so
+    // checking the cheap collection-list flags is sufficient — no extra
+    // METADATA_COLLECTION round-trip needed.
+    const projectId = collName.replace(/^codebase_/, "");
+    const hasCompleteGraphState =
+      allCollNames.has(symgraphMetaCollectionName(projectId)) &&
+      allCollNames.has(symgraphFileCollectionName(projectId)) &&
+      allCollNames.has(symgraphIndexCollectionName(projectId));
+
+    scored.push({
+      collectionName: collName,
+      fileHashes,
+      gitBlobShas: blobs,
+      matchCount,
+      hasCompleteGraphState,
+    });
   }
 
-  return bestMatch > 0 ? best : null;
+  if (scored.length === 0) return null;
+
+  scored.sort((a, b) => {
+    if (b.matchCount !== a.matchCount) return b.matchCount - a.matchCount;
+    // Same blob overlap → prefer complete graph state.
+    if (a.hasCompleteGraphState !== b.hasCompleteGraphState) {
+      return a.hasCompleteGraphState ? -1 : 1;
+    }
+    return 0;
+  });
+
+  return scored[0];
 }
 
 /** Get project metadata (for list display).
@@ -1168,34 +1306,79 @@ export async function deleteProjectMetadata(collName: string): Promise<void> {
 
 // ── Code graph persistence ──────────────────────────────────────────────
 
+/** Optional extras for {@link saveGraphData}. Mirrors {@link SaveMetadataExtras}
+ *  so the codegraph metadata point can carry the same git tree snapshot as the
+ *  codebase metadata, enabling a same-tree freshness gate that skips
+ *  `rebuildGraph` when the working tree hasn't moved. */
+export interface SaveGraphDataExtras {
+  /** Map of repo-relative path → git blob SHA-1 for the tree the graph was
+   *  built from. Persisted as JSON. */
+  gitBlobShas?: Map<string, string>;
+}
+
 /** Save a code graph to Qdrant as a single metadata point */
 export async function saveGraphData(
   graphCollName: string,
   projectPath: string,
   graph: CodeGraph,
+  extras?: SaveGraphDataExtras,
 ): Promise<void> {
   await ensureMetadataCollection();
   const qdrant = getClient();
   const id = metadataPointId(graphCollName);
 
+  const payload: Record<string, unknown> = {
+    collectionName: graphCollName,
+    projectPath,
+    lastBuiltAt: new Date().toISOString(),
+    nodeCount: graph.nodes.length,
+    edgeCount: graph.edges.length,
+    graphData: JSON.stringify(graph),
+  };
+
+  if (extras?.gitBlobShas) {
+    const blobObj: Record<string, string> = {};
+    for (const [k, v] of extras.gitBlobShas) {
+      blobObj[k] = v;
+    }
+    payload.gitBlobShas = JSON.stringify(blobObj);
+  }
+
   await qdrant.upsert(METADATA_COLLECTION, {
-    points: [
-      {
-        id,
-        vector: [0],
-        payload: {
-          collectionName: graphCollName,
-          projectPath,
-          lastBuiltAt: new Date().toISOString(),
-          nodeCount: graph.nodes.length,
-          edgeCount: graph.edges.length,
-          graphData: JSON.stringify(graph),
-        },
-      },
-    ],
+    points: [{ id, vector: [0], payload }],
   });
 
   logger.info("Saved code graph", { graphCollName, projectPath, nodes: graph.nodes.length, edges: graph.edges.length });
+}
+
+/** Load the git blob shas the code graph was last built from.
+ *  Returns null when the graph metadata is missing, has no `gitBlobShas`
+ *  field (older builds), or is malformed. Network errors propagate so
+ *  callers can distinguish "no data" from "Qdrant unreachable". */
+export async function loadGraphGitBlobShas(graphCollName: string): Promise<Map<string, string> | null> {
+  await ensureMetadataCollection();
+  const qdrant = getClient();
+  const id = metadataPointId(graphCollName);
+
+  const points = await qdrant.retrieve(METADATA_COLLECTION, {
+    ids: [id],
+    with_payload: ["gitBlobShas"],
+  });
+
+  if (points.length === 0) return null;
+  const raw = points[0].payload?.gitBlobShas;
+  if (typeof raw !== "string") return null;
+
+  try {
+    const obj = JSON.parse(raw) as Record<string, string>;
+    return new Map(Object.entries(obj));
+  } catch (err) {
+    logger.warn("loadGraphGitBlobShas: malformed gitBlobShas payload", {
+      graphCollName,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
 }
 
 /** Load a code graph from Qdrant.
