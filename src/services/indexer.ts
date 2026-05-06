@@ -1288,37 +1288,107 @@ export async function indexProject(
           return cloneResult;
         }
 
-        // ── Codegraph fast-path: clone symgraph + codegraph metadata ──
-        // When the working tree exactly matches the sibling's, the sibling's
-        // codegraph is also bit-identical and can be reused via collection
-        // clone instead of paying the ~150s rebuildGraph cost. CodeGraphNode
-        // file paths are absolute, but the collection-list-based sibling
-        // discovery filters by `coreProjectId` (path hash) so siblings are
-        // always same-worktree — paths in the cloned graph already match.
+        // ── Path selection: pick exactly one graph strategy, then execute ──
+        // The sibling-clone block has three end-states for the codegraph:
+        //   1. fresh-skip      — graph already matches working tree (rare on a
+        //                        freshly cloned codebase, but possible if the
+        //                        target collection had a stale codegraph from a
+        //                        prior aborted run that happens to be current)
+        //   2. zero-diff-clone — sibling's codegraph is bit-identical; clone
+        //                        the 3 symgraph collections + the codegraph
+        //                        metadata point. No rebuild needed.
+        //   3. small-diff      — diff ≤ INCREMENTAL_SYMBOL_THRESHOLD; clone
+        //                        sibling's 3 symgraph collections as a
+        //                        baseline, rebuildGraph(skipSymbolGraph), then
+        //                        patch only the changed files' symbol payloads.
+        //   4. full-rebuild    — diff exceeds threshold or no usable sibling
+        //                        graph state; rebuildGraph() rebuilds both the
+        //                        codegraph and the symbol graph end-to-end.
+        // Each path performs its own clone work, so no two paths can clone the
+        // same symgraph collection in a single call. Clones are fail-soft —
+        // any error inside the chosen path falls back to a full rebuild
+        // without re-running the earlier clones (see `pathError` handling).
         const isZeroDiff =
           diff.modified.length === 0 &&
           diff.added.length === 0 &&
           diff.deleted.length === 0;
-        let codegraphCloned = false;
-        if (isZeroDiff && sibling.hasCompleteGraphState) {
-          const siblingProjectId = sibling.collectionName.replace(
-            /^codebase_/,
-            "",
+        const smallDiffChangedCount =
+          diff.modified.length + diff.added.length + diff.deleted.length;
+
+        // Freshness check is performed up-front, before any graph-side clone,
+        // so the path decision uses the same source of truth across runs and
+        // we don't speculatively clone collections we may immediately discard.
+        // `isGraphFresh` returns false for cold collections; that's expected
+        // on a freshly cloned target (the graph metadata point doesn't exist
+        // yet).
+        const initiallyGraphFresh = await isGraphFresh(
+          resolvedPath,
+          currentGitBlobShas,
+        ).catch(() => false);
+
+        type GraphPath =
+          | "fresh-skip"
+          | "zero-diff-clone"
+          | "small-diff"
+          | "full-rebuild";
+        const graphPath: GraphPath = initiallyGraphFresh
+          ? "fresh-skip"
+          : isZeroDiff && sibling.hasCompleteGraphState
+            ? "zero-diff-clone"
+            : sibling.hasCompleteGraphState &&
+                smallDiffChangedCount > 0 &&
+                smallDiffChangedCount <= INCREMENTAL_SYMBOL_THRESHOLD
+              ? "small-diff"
+              : "full-rebuild";
+
+        const siblingProjectId = sibling.collectionName.replace(
+          /^codebase_/,
+          "",
+        );
+
+        // Helper: clone the three symgraph collections from the sibling. Used
+        // by both the zero-diff and small-diff paths (each path calls this at
+        // most once, so there's no double-clone within a single run).
+        const cloneSymgraphsFromSibling = async (): Promise<void> => {
+          await replaceCollectionFromSibling(
+            symgraphMetaCollectionName(siblingProjectId),
+            symgraphMetaCollectionName(projectId),
           );
+          await replaceCollectionFromSibling(
+            symgraphFileCollectionName(siblingProjectId),
+            symgraphFileCollectionName(projectId),
+          );
+          await replaceCollectionFromSibling(
+            symgraphIndexCollectionName(siblingProjectId),
+            symgraphIndexCollectionName(projectId),
+          );
+        };
+
+        // `pathHandled` indicates the chosen path completed (or fresh-skip).
+        // When it stays false (because the chosen path threw), we fall back
+        // to a full rebuild after logging — preserving the prior fail-soft
+        // semantics without ever re-cloning collections an earlier branch
+        // already touched.
+        let pathHandled = false;
+
+        if (graphPath === "fresh-skip") {
+          progress.phase = "building code graph";
+          onProgress?.(`Code graph fresh — skipping rebuild.`);
+          logger.info("Code graph fresh, skipping rebuild", {
+            resolvedPath,
+            cloned: false,
+          });
+          pathHandled = true;
+        } else if (graphPath === "zero-diff-clone") {
+          // Working tree exactly matches the sibling's; the sibling's
+          // codegraph is bit-identical and can be reused via collection clone
+          // instead of paying the ~150s rebuildGraph cost. CodeGraphNode
+          // file paths are absolute, but the collection-list-based sibling
+          // discovery filters by `coreProjectId` (path hash) so siblings are
+          // always same-worktree — paths in the cloned graph already match.
           try {
             progress.phase = "cloning code graph";
-            await replaceCollectionFromSibling(
-              symgraphMetaCollectionName(siblingProjectId),
-              symgraphMetaCollectionName(projectId),
-            );
-            await replaceCollectionFromSibling(
-              symgraphFileCollectionName(siblingProjectId),
-              symgraphFileCollectionName(projectId),
-            );
-            await replaceCollectionFromSibling(
-              symgraphIndexCollectionName(siblingProjectId),
-              symgraphIndexCollectionName(projectId),
-            );
+            await cloneSymgraphsFromSibling();
             const copied = await cloneGraphMetadataPoint(
               graphCollectionName(siblingProjectId),
               graphCollectionName(projectId),
@@ -1327,12 +1397,17 @@ export async function indexProject(
             if (copied) {
               invalidateGraphCache(resolvedPath);
               dropSymbolGraphCache(projectId);
-              codegraphCloned = true;
               onProgress?.(`Cloned code graph from sibling.`);
+              pathHandled = true;
+            } else {
+              logger.warn(
+                "Sibling codegraph metadata point missing; falling back to full rebuild",
+                { projectPath: resolvedPath },
+              );
             }
           } catch (graphCloneErr) {
             logger.warn(
-              "Sibling codegraph clone failed; falling through to rebuildGraph",
+              "Sibling codegraph clone failed; falling back to full rebuild",
               {
                 projectPath: resolvedPath,
                 error:
@@ -1341,59 +1416,23 @@ export async function indexProject(
                     : String(graphCloneErr),
               },
             );
-            // Fall through: rebuildGraph below will still catch this case.
+            // pathHandled stays false → full-rebuild fallback below.
           }
-        }
-
-        progress.phase = "building code graph";
-        // Trust a successful clone over a follow-up freshness read: the clone
-        // wrote `currentGitBlobShas` directly, so by definition the graph is
-        // fresh. Skipping the read-back avoids a race where the upsert is
-        // queued but not yet visible to the immediate retrieve.
-        const graphFresh =
-          codegraphCloned ||
-          (await isGraphFresh(resolvedPath, currentGitBlobShas).catch(() => false));
-
-        // Small-diff sibling-clone fast path (Phase 4-A).
-        //   Mirrors the watcher path's incremental strategy: when the diff is
-        //   small (≤ INCREMENTAL_SYMBOL_THRESHOLD files) we clone the sibling's
-        //   symgraph collections to seed a baseline, rebuild only the
-        //   file-import graph (parse pass #1 — mostly cache hits thanks to
-        //   Phase 4-E's blob-sha symbol cache), then patch only the changed
-        //   files' symbol payloads. Avoids the ~150s end-to-end symbol-graph
-        //   rebuild for small branch diffs.
-        //
-        //   `rebuildGraph(skipSymbolGraph: true)` overwrites the codegraph
-        //   metadata point via saveGraphData, so we deliberately do NOT clone
-        //   that point here — only the three symgraph collections need a
-        //   baseline for the incremental updater to mutate.
-        const smallDiffChangedCount =
-          diff.modified.length + diff.added.length + diff.deleted.length;
-        const smallDiffEligible =
-          !graphFresh &&
-          sibling.hasCompleteGraphState &&
-          smallDiffChangedCount > 0 &&
-          smallDiffChangedCount <= INCREMENTAL_SYMBOL_THRESHOLD;
-        let smallDiffApplied = false;
-        if (smallDiffEligible) {
-          const siblingProjectId = sibling.collectionName.replace(
-            /^codebase_/,
-            "",
-          );
+        } else if (graphPath === "small-diff") {
+          // Mirrors the watcher path's incremental strategy: clone the
+          // sibling's 3 symgraph collections to seed a baseline, rebuild only
+          // the file-import graph (parse pass #1 — mostly cache hits thanks
+          // to Phase 4-E's blob-sha symbol cache), then patch only the
+          // changed files' symbol payloads. Avoids the ~150s end-to-end
+          // symbol-graph rebuild for small branch diffs.
+          //
+          // `rebuildGraph(skipSymbolGraph: true)` overwrites the codegraph
+          // metadata point via saveGraphData, so we deliberately do NOT
+          // clone that point here — only the three symgraph collections
+          // need a baseline for the incremental updater to mutate.
           try {
             progress.phase = "cloning symbol graph baseline";
-            await replaceCollectionFromSibling(
-              symgraphMetaCollectionName(siblingProjectId),
-              symgraphMetaCollectionName(projectId),
-            );
-            await replaceCollectionFromSibling(
-              symgraphFileCollectionName(siblingProjectId),
-              symgraphFileCollectionName(projectId),
-            );
-            await replaceCollectionFromSibling(
-              symgraphIndexCollectionName(siblingProjectId),
-              symgraphIndexCollectionName(projectId),
-            );
+            await cloneSymgraphsFromSibling();
             // Drop the in-process symbol-graph cache so the incremental
             // updater reads the freshly-cloned shards from Qdrant rather
             // than any stale cached state for this projectId.
@@ -1431,27 +1470,27 @@ export async function indexProject(
                   `+${incResult.edgesDelta} edges (${incResult.filesChanged} changed, ${incResult.filesRemoved} removed)`,
               );
             }
-            smallDiffApplied = true;
+            pathHandled = true;
           } catch (smallDiffErr) {
             const smallDiffMsg =
               smallDiffErr instanceof Error
                 ? smallDiffErr.message
                 : String(smallDiffErr);
             logger.warn(
-              "Sibling-clone small-diff incremental path failed; falling through to full rebuild",
+              "Sibling-clone small-diff incremental path failed; falling back to full rebuild",
               { projectPath: resolvedPath, error: smallDiffMsg },
             );
-            // Fall through to the full-rebuild branch below.
+            // pathHandled stays false → full-rebuild fallback below.
           }
         }
 
-        if (graphFresh) {
-          onProgress?.(`Code graph fresh — skipping rebuild.`);
-          logger.info("Code graph fresh, skipping rebuild", {
-            resolvedPath,
-            cloned: codegraphCloned,
-          });
-        } else if (!smallDiffApplied) {
+        // Full-rebuild fallback: chosen path was "full-rebuild" up-front, OR
+        // the chosen path failed mid-flight (clone error / incremental
+        // updater threw). rebuildGraph() rebuilds the codegraph + symbol
+        // graph end-to-end and overwrites whatever cloned state may have
+        // landed before the failure.
+        if (!pathHandled) {
+          progress.phase = "building code graph";
           try {
             const graph = await rebuildGraph(resolvedPath, {
               gitBlobShas: currentGitBlobShas,
