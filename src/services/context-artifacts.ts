@@ -334,9 +334,16 @@ export async function indexArtifact(
   const { pointsSkipped } = await upsertPreEmbeddedChunks(collection, points);
 
   if (pointsSkipped > 0 && pointsSkipped === points.length) {
+    // Re-check existence so the error distinguishes "actually deleted" from
+    // "transiently rejecting writes" (e.g. mid-recover, concurrent index op,
+    // BM25 inference engine init). Per-point error details were already
+    // logged via logger.warn in upsertPreEmbeddedChunks's per-point fallback.
+    const stillExists = (await getCollectionInfo(collection).catch(() => null)) != null;
     throw new Error(
       `Qdrant upsert: all ${points.length} points for artifact "${artifact.name}" ` +
-      `were skipped (collection=${collection}). The collection may have been deleted externally.`
+      `were rejected (collection=${collection}, exists=${stillExists}). ` +
+      `${stillExists ? "Collection is alive but rejected every point — likely a transient write window or schema mismatch." : "Collection was deleted externally."} ` +
+      `Underlying per-point errors were logged via logger.warn.`
     );
   }
 

@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Giancarlo Erra - Altaire Limited
 import { createHash } from "node:crypto";
 import { QdrantClient } from "@qdrant/js-client-rest";
+import { coreProjectId } from "../config.js";
 import { QDRANT_API_KEY, QDRANT_HOST, QDRANT_PORT, QDRANT_URL, resolveQdrantPort } from "../constants.js";
 import type { ArtifactIndexState, CodeGraph, FileChunk, SearchResult } from "../types.js";
 import { getEmbeddingConfig } from "./embedding-config.js";
@@ -286,18 +287,265 @@ export async function upsertPreEmbeddedChunks(
   return { pointsSkipped: totalSkipped };
 }
 
-/** Delete all chunks for a specific file (matched by relativePath) */
+/** Maximum total wall time {@link probeWriteReadiness} will spend retrying. */
+const PROBE_TIMEOUT_MS = 30_000;
+/** Backoff between probe attempts. */
+const PROBE_POLL_MS = 500;
+
+/** Cached return type of `qdrant.getCollection(...)` so we can pass the source
+ *  collection's schema into probe helpers without recomputing it. The dense
+ *  vector dim comes from `config.params.vectors.dense.size`. */
+type CollectionInfoResponse = Awaited<ReturnType<QdrantClient["getCollection"]>>;
+
+/** Verify that a freshly-recovered collection accepts writes by inserting a
+ *  sentinel point with `wait: true` and immediately deleting it. recover
+ *  resolves once segments are applied to disk, but a brief warm-up window can
+ *  still reject writes (e.g. segment optimizer pause, BM25 inference engine
+ *  init). Status fields like `status: green` and `optimizer_status: ok` are
+ *  read-side health and don't reliably signal write-readiness. A real
+ *  upsert+delete cycle exercises the actual write path.
+ *
+ *  Throws after {@link PROBE_TIMEOUT_MS} if the upsert keeps failing. The
+ *  caller treats that as a hard failure of the clone path and falls back to
+ *  a full index. */
+async function probeWriteReadiness(target: string, sourceInfo: CollectionInfoResponse): Promise<void> {
+  const qdrant = getClient();
+  const vectorsConfig = sourceInfo.config?.params?.vectors;
+  // VectorsConfig is a union of single-vector params and a dictionary; the
+  // recovered collection here always has a named "dense" entry (we created
+  // the source via `ensureCollection` which only emits the dictionary form).
+  const denseConfig = (vectorsConfig as Record<string, { size?: number } | undefined> | undefined)?.dense;
+  const denseDim = denseConfig?.size;
+  if (typeof denseDim !== "number") {
+    throw new Error(`probeWriteReadiness: source dense vector dim missing (target=${target})`);
+  }
+
+  // Sentinel ID is randomized per call so concurrent probes don't collide.
+  // The all-zero leading bytes keep it visually distinct from sha256-derived
+  // chunk IDs — easy to recognize in logs/inspection.
+  const probeId = `00000000-0000-0000-0000-${Math.floor(Math.random() * 0xffffffffffff).toString(16).padStart(12, "0")}`;
+  const denseVector = new Array<number>(denseDim).fill(0);
+
+  const deadline = Date.now() + PROBE_TIMEOUT_MS;
+  let lastErr: unknown = null;
+
+  while (Date.now() < deadline) {
+    try {
+      await qdrant.upsert(target, {
+        wait: true,
+        points: [
+          {
+            id: probeId,
+            vector: {
+              dense: denseVector,
+              // Raw sparse {indices, values} bypasses Qdrant's server-side
+              // BM25 inference engine, which has its own warm-up cost. We
+              // just need to prove the write path accepts a point.
+              bm25: { indices: [0], values: [0] },
+            },
+            payload: { _socraticode_probe: true },
+          },
+        ],
+      });
+      // Best-effort cleanup; if delete fails we leak one payload-only point
+      // (recoverable on next clone). Don't throw — the readiness signal we
+      // wanted is the successful upsert.
+      await qdrant
+        .delete(target, { wait: true, points: [probeId] })
+        .catch((err) => {
+          logger.warn("probeWriteReadiness: failed to clean up probe point", {
+            target,
+            probeId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        });
+      return;
+    } catch (err) {
+      lastErr = err;
+      await new Promise((r) => setTimeout(r, PROBE_POLL_MS));
+    }
+  }
+
+  throw new Error(
+    `probeWriteReadiness: target "${target}" did not become write-ready within ${PROBE_TIMEOUT_MS}ms. ` +
+      `Last error: ${lastErr instanceof Error ? lastErr.message : String(lastErr)}`,
+  );
+}
+
+/** Resolve the base URL Qdrant should use to fetch its own snapshots during
+ *  recover. The recover endpoint pulls the snapshot tarball over HTTP, so the
+ *  URL must be reachable from inside the Qdrant process — which is NOT the
+ *  same as the client-facing URL when Qdrant is running in a container with
+ *  a port mapping (e.g. host `localhost:16333` → container `localhost:6333`).
+ *
+ *  Resolution order:
+ *    1. `QDRANT_INTERNAL_URL` env var — explicit override, preferred for any
+ *       deployment where the client can't reach Qdrant via the same URL
+ *       Qdrant uses to reach itself (Docker port mapping, k8s, etc).
+ *    2. `QDRANT_URL` env var — for cloud/remote Qdrant the public URL is
+ *       reachable from the Qdrant pod itself (it's the DNS name everyone
+ *       uses), so this is the right default.
+ *    3. Heuristic for managed local Docker: when host is `localhost` and the
+ *       port is non-default (≠ 6333), assume the host port is a mapping and
+ *       use container-internal `http://localhost:6333` instead.
+ *    4. Fallback: `<scheme>://<QDRANT_HOST>:<QDRANT_PORT>`. */
+function resolveQdrantBaseUrl(): string {
+  const override = process.env.QDRANT_INTERNAL_URL;
+  if (override) return override.replace(/\/+$/, "");
+  if (QDRANT_URL) return QDRANT_URL.replace(/\/+$/, "");
+  if (QDRANT_HOST === "localhost" && QDRANT_PORT !== 6333) {
+    return "http://localhost:6333";
+  }
+  const scheme = QDRANT_PORT === 443 ? "https" : "http";
+  return `${scheme}://${QDRANT_HOST}:${QDRANT_PORT}`;
+}
+
+/** Copy every point (dense + sparse vectors + payload) from `source` into
+ *  `target` using Qdrant's snapshot + recover primitives. The target
+ *  collection MUST NOT EXIST when this is called — recover auto-creates the
+ *  target from the snapshot's schema. Returns the number of points copied.
+ *
+ *  This is a server-side operation: a snapshot is taken on the source
+ *  collection (segment-level tar of the data directory), then recover
+ *  downloads that tarball back into the target. No client-mediated paging,
+ *  no per-point JSON serialization, no BM25 re-tokenization. ~14× faster
+ *  than scroll+upsert on the prod-equivalent 125k-point workload.
+ *
+ *  Both `createSnapshot` and `recoverSnapshot` block server-side until their
+ *  work is fully complete (Qdrant returns the response after the segments
+ *  are tar'd / the target collection is populated). A single follow-up
+ *  `getCollectionInfo` confirms the count parity; if it's short, that's a
+ *  bug we want to surface, not absorb with a retry loop.
+ *
+ *  Concurrency assumption: source is treated as quiescent during clone.
+ *  In practice each branch collection is owned by one indexProject run at
+ *  a time, so concurrent writes shouldn't happen.
+ *
+ *  Failure semantics:
+ *    - createSnapshot errors are propagated; no cleanup needed (no target
+ *      was created).
+ *    - recoverSnapshot errors are propagated, but target collection has
+ *      already been auto-created and may be in a partial state. Callers
+ *      MUST drop the partial target before falling through.
+ *    - The source-side snapshot is deleted best-effort in `finally`. */
+export async function cloneCollectionPoints(source: string, target: string): Promise<number> {
+  const qdrant = getClient();
+
+  const sourceInfo = await qdrant.getCollection(source);
+  const expectedCount = sourceInfo.points_count ?? 0;
+
+  const snapshotResp = await qdrant.createSnapshot(source);
+  const snapshotName = snapshotResp?.name;
+  if (snapshotName == null) {
+    throw new Error(`cloneCollectionPoints: createSnapshot for "${source}" returned no name`);
+  }
+  logger.info("cloneCollectionPoints: snapshot created", {
+    source,
+    snapshotName,
+    sizeBytes: snapshotResp?.size,
+  });
+
+  try {
+    const baseUrl = resolveQdrantBaseUrl();
+    const location = `${baseUrl}/collections/${encodeURIComponent(source)}/snapshots/${encodeURIComponent(snapshotName)}`;
+    // `api_key` is the credential Qdrant uses to authenticate when fetching
+    // the snapshot URL itself — distinct from the api-key header on this
+    // recover request. For a single-node deployment they're the same key.
+    await qdrant.recoverSnapshot(target, {
+      location,
+      ...(QDRANT_API_KEY ? { api_key: QDRANT_API_KEY } : {}),
+    });
+
+    // Verify that the target accepts writes before returning. recoverSnapshot
+    // resolves once segments are applied to disk, but a brief warm-up window
+    // can still reject writes (e.g. BM25 inference engine init, segment
+    // optimizer pause). Status fields like `status: green` are read-side
+    // health — not a write-readiness signal. A 1-point dummy upsert+delete
+    // exercises the actual write path so callers can safely upsert next.
+    await probeWriteReadiness(target, sourceInfo);
+
+    const info = await getCollectionInfo(target);
+    const got = info?.pointsCount ?? 0;
+    if (got < expectedCount) {
+      throw new Error(
+        `cloneCollectionPoints: recover from "${source}" to "${target}" reported success but only ${got}/${expectedCount} points landed`,
+      );
+    }
+    logger.info("cloneCollectionPoints (snapshot+recover) complete", {
+      source,
+      target,
+      expectedCount,
+      got,
+    });
+    return got;
+  } finally {
+    await qdrant.deleteSnapshot(source, snapshotName).catch((err) => {
+      logger.warn("cloneCollectionPoints: failed to cleanup source snapshot", {
+        source,
+        snapshotName,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+  }
+}
+
+/** Delete all chunks for a specific file (matched by relativePath).
+ *  Uses `wait: true` so the delete is fully applied before returning — any
+ *  upsert that immediately follows for the same relativePath cannot race the
+ *  in-flight delete and get silently rejected by Qdrant's per-point conflict
+ *  detection. */
 export async function deleteFileChunks(collectionName: string, relativePath: string): Promise<void> {
   const qdrant = getClient();
   logger.info("Deleting file chunks", { collection: collectionName, relativePath });
   await withRetry(
     () => qdrant.delete(collectionName, {
+      wait: true,
       filter: {
         must: [{ key: "relativePath", match: { value: relativePath } }],
       },
     }),
     "Qdrant delete chunks",
   );
+}
+
+/** Delete chunks for many files in a single Qdrant filter delete using
+ *  `match: { any: [...] }`. Replaces N sequential per-file deletes (and
+ *  N round-trips) with one round-trip — a meaningful win when the diff
+ *  set is in the hundreds-to-thousands range, e.g. post sibling-clone
+ *  cleanup.
+ *
+ *  Qdrant caps the size of a single filter; if the path list is huge,
+ *  we chunk it into batches of `DELETE_BATCH_FILES`. Empty input is a
+ *  no-op (avoids issuing a "delete everything" filter).
+ *
+ *  Uses `wait: true` so the delete is fully applied before returning. The
+ *  sibling-clone path immediately follows this with upserts on the same
+ *  paths; without `wait: true` Qdrant's default async delete can still be
+ *  in flight when the upsert lands, causing per-point rejections. */
+const DELETE_BATCH_FILES = 1000;
+export async function deleteFileChunksBatch(
+  collectionName: string,
+  relativePaths: readonly string[],
+): Promise<void> {
+  if (relativePaths.length === 0) return;
+  const qdrant = getClient();
+  logger.info("Deleting file chunks (batched)", {
+    collection: collectionName,
+    fileCount: relativePaths.length,
+  });
+  for (let i = 0; i < relativePaths.length; i += DELETE_BATCH_FILES) {
+    const batch = relativePaths.slice(i, i + DELETE_BATCH_FILES);
+    await withRetry(
+      () =>
+        qdrant.delete(collectionName, {
+          wait: true,
+          filter: {
+            must: [{ key: "relativePath", match: { any: batch as string[] } }],
+          },
+        }),
+      `Qdrant delete chunks batch (${i}-${i + batch.length})`,
+    );
+  }
 }
 
 /** Hybrid search: combines dense semantic search with BM25 lexical search via RRF fusion.
@@ -532,7 +780,7 @@ export async function getCollectionInfo(name: string): Promise<{
 
 // ── Project metadata collection ──────────────────────────────────────────
 
-const METADATA_COLLECTION = "socraticode_metadata";
+export const METADATA_COLLECTION = "socraticode_metadata";
 
 /** Cached flag: once the metadata collection is confirmed to exist, skip re-checking */
 let metadataCollectionReady = false;
@@ -543,7 +791,7 @@ export function resetMetadataCollectionCache(): void {
 }
 
 /** Ensure the metadata collection exists (idempotent, cached after first success) */
-async function ensureMetadataCollection(): Promise<void> {
+export async function ensureMetadataCollection(): Promise<void> {
   if (metadataCollectionReady) return;
 
   const qdrant = getClient();
@@ -609,7 +857,7 @@ export async function ensureEmbeddingCacheCollection(): Promise<void> {
 
 /** Generate a stable UUID from a collection name (for Qdrant point ID).
  *  Uses SHA-256 to avoid collision risk inherent in simpler hashes (e.g. djb2). */
-function metadataPointId(collName: string): string {
+export function metadataPointId(collName: string): string {
   const hash = createHash("sha256").update(collName).digest("hex").slice(0, 32);
   // Format as UUID: 8-4-4-4-12
   return `${hash.slice(0, 8)}-${hash.slice(8, 12)}-${hash.slice(12, 16)}-${hash.slice(16, 20)}-${hash.slice(20, 32)}`;
@@ -746,6 +994,117 @@ export async function loadProjectGitBlobShas(collName: string): Promise<Map<stri
     });
     return null;
   }
+}
+
+/** Result of {@link findSiblingMetadata}: the candidate sibling collection plus
+ *  enough hash material for the caller to seed a fast-path index. */
+export interface SiblingMetadata {
+  collectionName: string;
+  fileHashes: Map<string, string>;
+  gitBlobShas: Map<string, string>;
+  matchCount: number;
+}
+
+/** Find the sibling codebase collection whose stored gitBlobShas overlap most
+ *  with the supplied `currentBlobShas`. `excludeCollection` lets the caller
+ *  skip the in-progress target so it isn't considered as its own sibling.
+ *
+ *  Implementation: candidate discovery uses Qdrant's collection-list API
+ *  (cheap, in-memory registry — milliseconds regardless of payload size).
+ *  Candidates are codebase collections that share the project's
+ *  path-derived `coreProjectId` hash; this includes branch-aware suffixed
+ *  variants (`codebase_<hash>__<branch>`) plus the bare branch-unaware
+ *  collection. Each candidate's metadata point is then fetched by
+ *  deterministic id (`metadataPointId(collName)`) in a single batch retrieve.
+ *
+ *  Why not scroll METADATA_COLLECTION with a `projectPath` filter? That
+ *  collection uses `on_disk_payload: true`, so filter evaluation forces
+ *  Qdrant to disk-read every matching point's full payload (including
+ *  multi-megabyte `gitBlobShas` and `graphData` JSON blobs) just to project
+ *  the requested fields — ~30s for ~17 matching points on a 1-vCPU instance,
+ *  scaling linearly with branches per project. The collection-list approach
+ *  reads zero payloads during discovery and only pays the disk-read cost
+ *  for the small set of actual codebase candidates. */
+export async function findSiblingMetadata(
+  projectPath: string,
+  currentBlobShas: Map<string, string>,
+  excludeCollection?: string,
+): Promise<SiblingMetadata | null> {
+  await ensureMetadataCollection();
+  const qdrant = getClient();
+
+  // Discover candidate sibling collections via the collection registry.
+  // Codebase collections for this project all share the path-derived
+  // `coreProjectId` hash; branch-aware variants append `__<branch>`.
+  const coreId = coreProjectId(projectPath);
+  const baseName = `codebase_${coreId}`;
+  const branchPrefix = `${baseName}__`;
+
+  const { collections } = await qdrant.getCollections();
+  const candidateCollNames = collections
+    .map((c) => c.name)
+    .filter(
+      (name) =>
+        (name === baseName || name.startsWith(branchPrefix)) &&
+        name !== excludeCollection,
+    );
+
+  if (candidateCollNames.length === 0) {
+    return null;
+  }
+
+  // Batch retrieve metadata points for all candidates in a single call. Point
+  // ids are deterministic from collection names so we can build the id list
+  // up-front; remap returned points back to their source collName via id.
+  const idToColl = new Map<string, string>();
+  for (const collName of candidateCollNames) {
+    idToColl.set(metadataPointId(collName), collName);
+  }
+  const ids = Array.from(idToColl.keys());
+
+  const points = await qdrant.retrieve(METADATA_COLLECTION, {
+    ids,
+    with_payload: ["gitBlobShas", "fileHashes"],
+  });
+
+  let bestMatch = -1;
+  let best: SiblingMetadata | null = null;
+
+  for (const point of points) {
+    const collName = idToColl.get(String(point.id));
+    if (collName === undefined) continue;
+    const payload = point.payload;
+
+    const blobsRaw = payload?.gitBlobShas;
+    if (typeof blobsRaw !== "string") continue;
+    let blobs: Map<string, string>;
+    try {
+      blobs = new Map(Object.entries(JSON.parse(blobsRaw) as Record<string, string>));
+    } catch {
+      continue;
+    }
+
+    let matchCount = 0;
+    for (const [path, sha] of currentBlobShas) {
+      if (blobs.get(path) === sha) matchCount++;
+    }
+
+    if (matchCount > bestMatch) {
+      const hashesRaw = payload?.fileHashes;
+      let fileHashes = new Map<string, string>();
+      if (typeof hashesRaw === "string") {
+        try {
+          fileHashes = new Map(Object.entries(JSON.parse(hashesRaw) as Record<string, string>));
+        } catch {
+          continue;
+        }
+      }
+      bestMatch = matchCount;
+      best = { collectionName: collName, fileHashes, gitBlobShas: blobs, matchCount };
+    }
+  }
+
+  return bestMatch > 0 ? best : null;
 }
 
 /** Get project metadata (for list display).
