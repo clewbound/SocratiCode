@@ -1076,10 +1076,17 @@ export async function indexProject(
     });
 
     if (pointsSkipped > 0 && pointsSkipped === batchPoints.length) {
-      // Every single point in the batch was skipped — the collection likely disappeared
+      // Every point in the batch was rejected. Re-check existence so the error
+      // distinguishes "actually deleted" from "transiently rejecting writes"
+      // (e.g. mid-recover, concurrent index op, BM25 inference engine init).
+      // Per-point error details were already logged via logger.warn in
+      // upsertPreEmbeddedChunks's per-point fallback.
+      const stillExists = (await getCollectionInfo(collection).catch(() => null)) != null;
       throw new Error(
         `Qdrant upsert: all ${batchPoints.length} points in batch ${batchNum}/${totalBatches} ` +
-        `were skipped (collection=${collection}). The collection may have been deleted externally.`
+        `were rejected (collection=${collection}, exists=${stillExists}). ` +
+        `${stillExists ? "Collection is alive but rejected every point — likely a transient write window or schema mismatch." : "Collection was deleted externally."} ` +
+        `Underlying per-point errors were logged via logger.warn.`
       );
     }
 
@@ -1404,9 +1411,17 @@ export async function updateProjectIndex(
       const { pointsSkipped } = await upsertPreEmbeddedChunks(collection, batchPoints);
 
       if (pointsSkipped > 0 && pointsSkipped === batchPoints.length) {
+        // Re-check existence so the error distinguishes "actually deleted"
+        // from "transiently rejecting writes" (e.g. mid-recover, concurrent
+        // index op, BM25 inference engine init). Per-point error details were
+        // already logged via logger.warn in upsertPreEmbeddedChunks's
+        // per-point fallback.
+        const stillExists = (await getCollectionInfo(collection).catch(() => null)) != null;
         throw new Error(
           `Qdrant upsert: all ${batchPoints.length} points in batch ${batchNum}/${totalBatches} ` +
-          `were skipped (collection=${collection}). The collection may have been deleted externally.`
+          `were rejected (collection=${collection}, exists=${stillExists}). ` +
+          `${stillExists ? "Collection is alive but rejected every point — likely a transient write window or schema mismatch." : "Collection was deleted externally."} ` +
+          `Underlying per-point errors were logged via logger.warn.`
         );
       }
 
