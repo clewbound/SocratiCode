@@ -1,21 +1,31 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 Giancarlo Erra - Altaire Limited
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { coreProjectId } from "../../src/config.js";
 import { ensureQdrantReady } from "../../src/services/docker.js";
+import { getEmbeddingConfig } from "../../src/services/embedding-config.js";
 import { ensureOllamaReady } from "../../src/services/ollama.js";
 import {
+  cloneCollectionPoints,
   deleteCollection,
   deleteFileChunks,
+  deleteFileChunksBatch,
   deleteProjectMetadata,
   ensureCollection,
+  ensureMetadataCollection,
+  findSiblingMetadata,
+  getClient,
   getCollectionInfo,
   getProjectMetadata,
   listCodebaseCollections,
   loadProjectGitBlobShas,
   loadProjectHashes,
+  METADATA_COLLECTION,
+  metadataPointId,
   saveProjectMetadata,
   searchChunks,
   upsertChunks,
+  upsertPreEmbeddedChunks,
 } from "../../src/services/qdrant.js";
 import type { FileChunk } from "../../src/types.js";
 import { isDockerAvailable } from "../helpers/fixtures.js";
@@ -264,6 +274,191 @@ describe.skipIf(!dockerAvailable)("qdrant service", () => {
         await deleteCollection(collection);
       }
     });
+  });
+
+  describe("deleteFileChunksBatch + upsert ordering", () => {
+    it(
+      "serializes delete+upsert via wait:true so the replacement survives",
+      async () => {
+        const collection = "codebase_test_delete_upsert_race";
+        const dims = getEmbeddingConfig().embeddingDimensions;
+        try {
+          await ensureCollection(collection);
+
+          // Seed: 1 chunk for relativePath "race.ts". The delete-write race
+          // bug used to manifest when the indexer issued a non-blocking
+          // filter delete and immediately upserted the replacement — Qdrant
+          // would see an in-flight delete during the upsert and silently
+          // reject conflicting points. With wait:true on delete this is
+          // deterministic: delete is fully applied before upsert begins.
+          const denseVector = Array.from({ length: dims }, () => 0.1);
+          await upsertPreEmbeddedChunks(collection, [
+            {
+              id: "00000000-0000-0000-0000-000000000777",
+              vector: denseVector,
+              bm25Text: "seed point for race test",
+              payload: { relativePath: "race.ts", original: true },
+            },
+          ]);
+
+          // Delete by filter (sibling-clone cleanup uses this exact path)
+          // followed immediately by upsert of the replacement.
+          await deleteFileChunksBatch(collection, ["race.ts"]);
+          await upsertPreEmbeddedChunks(collection, [
+            {
+              id: "00000000-0000-0000-0000-000000000888",
+              vector: denseVector,
+              bm25Text: "replacement point after delete",
+              payload: { relativePath: "race.ts", original: false },
+            },
+          ]);
+
+          const info = await getCollectionInfo(collection);
+          expect(info).not.toBeNull();
+          if (info == null) throw new Error("info was null");
+          // The seed must be gone, the replacement must be present.
+          expect(info.pointsCount).toBe(1);
+        } finally {
+          await deleteCollection(collection).catch(() => {});
+        }
+      },
+      60_000,
+    );
+  });
+
+  describe("cloneCollectionPoints", () => {
+    it(
+      "clones all points via snapshot + recover",
+      async () => {
+        const source = "test_clone_source";
+        const target = "test_clone_target";
+        const dims = getEmbeddingConfig().embeddingDimensions;
+        try {
+          await ensureCollection(source);
+          // Do NOT ensureCollection(target) — recover auto-creates the
+          // target collection from the snapshot's schema. Pre-creating
+          // would cause recover to fail.
+
+          // 300 points is plenty to exercise the snapshot/recover round
+          // trip end-to-end. Vector values are arbitrary — they just need
+          // to be the configured dimensionality so the collection accepts
+          // them.
+          const denseVector = Array.from({ length: dims }, () => 0.1);
+          const points = Array.from({ length: 300 }, (_, i) => ({
+            id: `00000000-0000-0000-0000-${String(i).padStart(12, "0")}`,
+            vector: denseVector,
+            bm25Text: `point ${i}`,
+            payload: { idx: i, relativePath: `file-${i}.ts` },
+          }));
+          await upsertPreEmbeddedChunks(source, points);
+
+          const cloned = await cloneCollectionPoints(source, target);
+          expect(cloned).toBe(300);
+
+          const targetInfo = await getCollectionInfo(target);
+          expect(targetInfo).not.toBeNull();
+          if (targetInfo == null) throw new Error("targetInfo was null");
+          expect(targetInfo.pointsCount).toBe(300);
+        } finally {
+          await deleteCollection(source).catch(() => {});
+          await deleteCollection(target).catch(() => {});
+        }
+      },
+      120_000,
+    );
+  });
+
+  describe("findSiblingMetadata", () => {
+    it(
+      "returns the most-overlapping sibling for a project path",
+      async () => {
+        // Sibling discovery uses the Qdrant collection registry: candidates
+        // are codebase collections sharing the project's path-derived
+        // `coreProjectId`. Stand up real (empty) collections under that
+        // hash so the test exercises the actual production path.
+        const fakePath = "/tmp/findsibling-fixture";
+        const otherPath = "/tmp/findsibling-fixture-other";
+        const coreId = coreProjectId(fakePath);
+        const otherCoreId = coreProjectId(otherPath);
+        const projA = `codebase_${coreId}__branch-a`;
+        const projA2 = `codebase_${coreId}__branch-b`;
+        const projB = `codebase_${otherCoreId}__branch-c`;
+
+        await ensureMetadataCollection();
+        // Create empty 1-d vector collections (cheap; same shape as cache uses).
+        for (const c of [projA, projA2, projB]) {
+          await ensureCollection(c, 1);
+        }
+
+        await saveProjectMetadata(
+          projA,
+          fakePath,
+          1,
+          1,
+          new Map([["a.ts", "h1"]]),
+          "completed",
+          {
+            gitBlobShas: new Map([
+              ["a.ts", "00".repeat(20)],
+              ["b.ts", "11".repeat(20)],
+            ]),
+          },
+        );
+        await saveProjectMetadata(
+          projA2,
+          fakePath,
+          1,
+          1,
+          new Map([["a.ts", "h1"]]),
+          "completed",
+          { gitBlobShas: new Map([["a.ts", "00".repeat(20)]]) }, // 1 overlap
+        );
+        await saveProjectMetadata(
+          projB,
+          otherPath,
+          1,
+          1,
+          new Map([["x.ts", "h2"]]),
+          "completed",
+          {
+            gitBlobShas: new Map([
+              ["a.ts", "00".repeat(20)],
+              ["b.ts", "11".repeat(20)],
+            ]),
+          },
+        );
+
+        try {
+          const target = new Map([
+            ["a.ts", "00".repeat(20)],
+            ["b.ts", "11".repeat(20)],
+          ]);
+          const result = await findSiblingMetadata(fakePath, target, projA);
+          // projA excluded — projA2 has 1 overlap, projB filtered out by hash
+          // prefix (different coreProjectId).
+          expect(result).not.toBeNull();
+          if (result == null) throw new Error("result was null");
+          expect(result.collectionName).toBe(projA2);
+          expect(result.matchCount).toBe(1);
+
+          // Now query without exclusion: projA wins outright (2 overlaps).
+          const without = await findSiblingMetadata(fakePath, target);
+          expect(without).not.toBeNull();
+          if (without == null) throw new Error("without was null");
+          expect(without.collectionName).toBe(projA);
+          expect(without.matchCount).toBe(2);
+        } finally {
+          const qdrant = getClient();
+          for (const c of [projA, projA2, projB]) {
+            await qdrant
+              .delete(METADATA_COLLECTION, { points: [metadataPointId(c)] })
+              .catch(() => {});
+            await deleteCollection(c).catch(() => {});
+          }
+        }
+      },
+      60_000,
+    );
   });
 
   describe("collection deletion", () => {
