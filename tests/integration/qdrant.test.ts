@@ -11,6 +11,7 @@ import {
   getCollectionInfo,
   getProjectMetadata,
   listCodebaseCollections,
+  loadProjectGitBlobShas,
   loadProjectHashes,
   saveProjectMetadata,
   searchChunks,
@@ -245,6 +246,23 @@ describe.skipIf(!dockerAvailable)("qdrant service", () => {
       // After deletion, metadata should be gone
       const metadata = await getProjectMetadata(metadataCollection);
       expect(metadata).toBeNull();
+    });
+
+    it("round-trips gitBlobShas through saveProjectMetadata + loadProjectGitBlobShas", async () => {
+      const collection = "test_qdrant_gitblob_roundtrip";
+      const projectPath = "/tmp/fixture";
+      await ensureCollection(collection, 1024);
+      try {
+        const fileHashes = new Map([["a.ts", "sha256-aaa"]]);
+        const gitBlobShas = new Map([["a.ts", "0123456789012345678901234567890123456789"]]);
+        await saveProjectMetadata(collection, projectPath, 1, 1, fileHashes, "completed", { gitBlobShas });
+        const loaded = await loadProjectGitBlobShas(collection);
+        expect(loaded).not.toBeNull();
+        if (loaded == null) throw new Error("loaded was null");
+        expect(loaded.get("a.ts")).toBe("0123456789012345678901234567890123456789");
+      } finally {
+        await deleteCollection(collection);
+      }
     });
   });
 

@@ -23,6 +23,7 @@ import { ensureDynamicLanguages, getAstGrepLang, rebuildGraph, removeGraph } fro
 import { ensureArtifactsIndexed, loadConfig, removeAllArtifacts } from "./context-artifacts.js";
 import { type CachedEmbedding, lookupEmbeddings, putEmbedding } from "./embedding-cache.js";
 import { generateEmbeddings, prepareDocumentText } from "./embeddings.js";
+import { getGitBlobShas } from "./git-tree.js";
 import { createIgnoreFilter, shouldIgnore } from "./ignore.js";
 import { acquireProjectLock, releaseProjectLock } from "./lock.js";
 import { logger } from "./logger.js";
@@ -33,6 +34,7 @@ import {
   ensureCollection,
   getCollectionInfo,
   getProjectMetadata,
+  loadProjectGitBlobShas,
   loadProjectHashes,
   saveProjectMetadata,
   upsertPreEmbeddedChunks,
@@ -226,6 +228,19 @@ function detectCommonPrefix(hashes: Map<string, string>): string | null {
 /** Hash file content for change detection */
 export function hashContent(content: string): string {
   return createHash("sha256").update(content).digest("hex").slice(0, 16);
+}
+
+/**
+ * Compares two gitBlobShas maps for exact equality (same paths, same shas).
+ * Cheap O(n) check, n = file count. Used by the same-collection fast-skip
+ * path to detect when a branch is unchanged since its last full index.
+ */
+function gitBlobShasEqual(a: Map<string, string>, b: Map<string, string>): boolean {
+  if (a.size !== b.size) return false;
+  for (const [filePath, sha] of a) {
+    if (b.get(filePath) !== sha) return false;
+  }
+  return true;
 }
 
 /** Generate a stable chunk ID as a valid UUID (required by Qdrant) */
@@ -672,6 +687,11 @@ export async function indexProject(
   const collection = collectionName(projectId);
   const hashes = await getProjectHashes(projectId, collection, resolvedPath);
 
+  // Snapshot the current git tree once per run. Null when the directory is
+  // not a git checkout — in that case we simply don't persist git shas and
+  // future fast-path detection silently degrades to a normal scan.
+  const currentGitBlobShas = await getGitBlobShas(resolvedPath);
+
   // Smart re-index: check if collection already has data.
   // getCollectionInfo now throws on transient errors (instead of returning null),
   // so a Qdrant blip will abort the operation rather than trigger a false clean-start.
@@ -692,6 +712,77 @@ export async function indexProject(
   // IMPORTANT: We NEVER delete a collection here. Only removeProjectIndex
   // (called by the codebase_remove tool) is allowed to delete collections.
   await ensureCollection(collection);
+
+  // ── Fast-path: same-collection skip ──
+  // If this collection has prior metadata with gitBlobShas matching the
+  // current working tree exactly, the index is already up to date — skip
+  // scan + embed and just refresh the graph. Saves the bulk of the work on
+  // repeat invocations against an unchanged branch.
+  //
+  // Conditions for taking the fast path:
+  //   1. Project is a git repo (currentGitBlobShas is non-null).
+  //   2. Collection already has data + saved gitBlobShas + saved hashes.
+  //   3. Saved gitBlobShas matches current working-tree gitBlobShas exactly.
+  //
+  // Edge cases that intentionally fall through to the normal scan:
+  //   - First-time index (hasExistingData = false).
+  //   - Project not a git repo (currentGitBlobShas = null).
+  //   - Old collection saved before gitBlobShas was tracked (previous = null).
+  //   - Any file changed (gitBlobShasEqual returns false).
+  //   - Existing data but no in-memory hashes (cannot persist a complete map).
+  if (hasExistingData && currentGitBlobShas !== null && hashes.size > 0) {
+    const previousGitBlobShas = await loadProjectGitBlobShas(collection).catch(
+      () => null,
+    );
+    if (
+      previousGitBlobShas !== null &&
+      gitBlobShasEqual(previousGitBlobShas, currentGitBlobShas)
+    ) {
+      onProgress?.(
+        `Fast-path: branch unchanged since last index (${currentGitBlobShas.size} files). Skipping scan + embed.`,
+      );
+      logger.info("Same-collection fast-skip taken", {
+        collection,
+        files: currentGitBlobShas.size,
+      });
+
+      progress.phase = "building code graph";
+      try {
+        const graph = await rebuildGraph(resolvedPath);
+        onProgress?.(
+          `Code graph: ${graph.nodes.length} files, ${graph.edges.length} edges`,
+        );
+      } catch (graphErr) {
+        const graphMsg =
+          graphErr instanceof Error ? graphErr.message : String(graphErr);
+        logger.warn("Code graph build failed during fast-skip (non-fatal)", {
+          projectPath: resolvedPath,
+          error: graphMsg,
+        });
+      }
+
+      progress.phase = "saving metadata";
+      await saveProjectMetadata(
+        collection,
+        resolvedPath,
+        hashes.size,
+        hashes.size,
+        hashes,
+        "completed",
+        { gitBlobShas: currentGitBlobShas },
+      );
+
+      onProgress?.(`Indexing complete (fast-path): ${hashes.size} files, 0 chunks`);
+      lastCompleted.set(resolvedPath, {
+        type: "full-index",
+        completedAt: Date.now(),
+        durationMs: Date.now() - progress.startedAt,
+        filesProcessed: hashes.size,
+        chunksCreated: 0,
+      });
+      return { filesIndexed: hashes.size, chunksCreated: 0, cancelled: false };
+    }
+  }
 
   if (hasExistingData) {
     if (hashes.size > 0) {
@@ -1028,7 +1119,15 @@ export async function indexProject(
 
   // Final metadata save
   progress.phase = "saving metadata";
-  await saveProjectMetadata(collection, resolvedPath, filesIndexed, hashes.size, hashes, "completed");
+  await saveProjectMetadata(
+    collection,
+    resolvedPath,
+    filesIndexed,
+    hashes.size,
+    hashes,
+    "completed",
+    currentGitBlobShas != null ? { gitBlobShas: currentGitBlobShas } : undefined,
+  );
 
   // Auto-build code graph
   progress.phase = "building code graph";
@@ -1121,6 +1220,11 @@ export async function updateProjectIndex(
   const projectId = projectIdFromPath(resolvedPath);
   const collection = collectionName(projectId);
   const hashes = await getProjectHashes(projectId, collection, resolvedPath);
+
+  // Snapshot the current git tree once per run. Null for non-git checkouts
+  // (or unreadable indexes); in that case future fast-path detection
+  // silently falls back to a content-hash scan.
+  const currentGitBlobShas = await getGitBlobShas(resolvedPath);
 
   // Ensure collection exists — getCollectionInfo now throws on transient errors,
   // so a network blip will abort rather than cascade into a destructive fallback.
@@ -1330,7 +1434,15 @@ export async function updateProjectIndex(
   }
 
   // Persist updated hashes
-  await saveProjectMetadata(collection, resolvedPath, currentFiles.length, hashes.size, hashes, "completed");
+  await saveProjectMetadata(
+    collection,
+    resolvedPath,
+    currentFiles.length,
+    hashes.size,
+    hashes,
+    "completed",
+    currentGitBlobShas != null ? { gitBlobShas: currentGitBlobShas } : undefined,
+  );
 
   // Auto-rebuild code graph if any files changed (Phase F).
   //
