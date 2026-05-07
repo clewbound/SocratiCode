@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 Giancarlo Erra - Altaire Limited
 import path from "node:path";
-import { collectionName, projectIdFromPath, resolveLinkedCollections } from "../config.js";
+import { collectionName, detectGitBranch, projectIdFromPath, resolveLinkedCollections, resolveRepoId } from "../config.js";
 import { SEARCH_DEFAULT_LIMIT, SEARCH_MIN_SCORE } from "../constants.js";
 import { maybeRegisterFromTool } from "../daemon/watchlist.js";
 import { getGraphStatus } from "../services/code-graph.js";
@@ -297,6 +297,24 @@ export async function handleQueryTool(
         }
       } catch {
         // Artifact status check failed — non-critical
+      }
+
+      // Daemon-mode-only: surface watcher state for the queried path.
+      // Stdio-mode output is unchanged; gated on exact "true" to avoid
+      // accidental enablement from truthy-but-unrelated values.
+      if (process.env.SOCRATICODE_DAEMON_MODE === "true") {
+        const branch = detectGitBranch(resolvedPath);
+        let repoId = "";
+        try {
+          repoId = resolveRepoId(resolvedPath);
+        } catch {
+          // resolveRepoId can throw on invalid env override; leave repoId blank.
+        }
+        statusLines.push("");
+        statusLines.push("Watcher:");
+        statusLines.push(`  active=${isWatching(resolvedPath)}`);
+        statusLines.push(`  repoId=${repoId}`);
+        statusLines.push(`  branch=${branch ?? "(detached)"}`);
       }
 
       return statusLines.join("\n");
