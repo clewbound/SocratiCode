@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Giancarlo Erra - Altaire Limited
 
 import fs from "node:fs";
+import { cleanupStaleLocks } from "../services/lock.js";
 import { logger } from "../services/logger.js";
 import { gracefulShutdown } from "../services/startup.js";
 import { startWatching } from "../services/watcher.js";
@@ -17,6 +18,9 @@ export async function main(): Promise<number> {
 
   // Implies repo-keying for projectIdFromPath
   process.env.SOCRATICODE_DAEMON_MODE = "true";
+
+  // Reclaim lock files orphaned by a previous daemon crash.
+  await cleanupStaleLocks();
 
   let handle: DaemonServerHandle;
   try {
