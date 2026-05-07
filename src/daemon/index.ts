@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 Giancarlo Erra - Altaire Limited
 
+import fs from "node:fs";
 import { logger } from "../services/logger.js";
 import { gracefulShutdown } from "../services/startup.js";
+import { startWatching } from "../services/watcher.js";
 import { detectLegacyCollections } from "./legacy-detect.js";
 import { type DaemonServerHandle, startDaemonServer } from "./server.js";
+import { watchlist } from "./watchlist.js";
 
 export async function main(): Promise<number> {
   // Make the process easy to find in `ps aux | grep socraticode`.
@@ -58,9 +61,22 @@ export async function main(): Promise<number> {
   return await new Promise(() => 0);
 }
 
-/** Stub. Phase 4 will re-arm persisted file watchers from a watchlist on disk. */
+/** Re-arm persisted file watchers from the on-disk watchlist. */
 async function initWatchlist(): Promise<void> {
-  // phase 4
+  watchlist.load();
+  for (const entry of watchlist.entries()) {
+    if (!fs.existsSync(entry.path)) {
+      logger.warn("watchlist entry path no longer exists, will GC", { path: entry.path });
+      continue; // GC sweep handles removal
+    }
+    await startWatching(entry.path).catch((err) => {
+      logger.error("failed to re-arm watcher on startup", {
+        path: entry.path,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+  }
+  logger.info("watchlist initialized", { count: watchlist.entries().length });
 }
 
 /** Stub. Phase 5 will start a per-repo HEAD-flip watcher to swap branch
