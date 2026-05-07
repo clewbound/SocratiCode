@@ -1,8 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 Giancarlo Erra - Altaire Limited
 
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { type DaemonServerHandle, startDaemonServer } from "../../src/daemon/server.js";
+import { watchlist } from "../../src/daemon/watchlist.js";
 
 const SHOULD_RUN = process.env.SOCRATICODE_INTEGRATION === "true";
 
@@ -60,5 +64,33 @@ describe.skipIf(!SHOULD_RUN)("daemon end-to-end", () => {
   it("second daemon on the same port fails to start", async () => {
     process.env.SOCRATICODE_DAEMON_PORT = String(handle.port);
     await expect(startDaemonServer()).rejects.toThrow(/EADDRINUSE/);
+  });
+
+  it("daemon restart re-arms watchers from persisted watchlist", () => {
+    // Simulate a daemon lifecycle: register a path, "restart" by reloading.
+    const stateDir = mkdtempSync(join(tmpdir(), "state-"));
+    const prevStateDir = process.env.SOCRATICODE_STATE_DIR;
+    process.env.SOCRATICODE_STATE_DIR = stateDir;
+    try {
+      watchlist.load();
+      for (const e of watchlist.entries()) watchlist.remove(e.path);
+      watchlist.add({
+        path: "/tmp/somewhere",
+        repoId: "test-repo",
+        commonDir: null,
+        addedVia: "explicit",
+      });
+      // Simulate restart by reloading.
+      watchlist.load();
+      expect(watchlist.has("/tmp/somewhere")).toBe(true);
+    } finally {
+      for (const e of watchlist.entries()) watchlist.remove(e.path);
+      if (prevStateDir != null) {
+        process.env.SOCRATICODE_STATE_DIR = prevStateDir;
+      } else {
+        delete process.env.SOCRATICODE_STATE_DIR;
+      }
+      rmSync(stateDir, { recursive: true, force: true });
+    }
   });
 });

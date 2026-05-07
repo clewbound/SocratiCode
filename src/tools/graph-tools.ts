@@ -3,6 +3,7 @@
 import path from "node:path";
 import { projectIdFromPath } from "../config.js";
 import { mergeExtraExtensions } from "../constants.js";
+import { maybeRegisterFromTool } from "../daemon/watchlist.js";
 import { awaitGraphBuild, findCircularDependencies, generateMermaidDiagram, getFileDependencies, getGraphBuildProgress, getGraphStats, getGraphStatus, getLastGraphBuildCompleted, getOrBuildGraph, isGraphBuildInProgress, rebuildGraph, removeGraph } from "../services/code-graph.js";
 import { detectEntryPoints } from "../services/graph-entrypoints.js";
 import {
@@ -24,6 +25,7 @@ export async function handleGraphTool(
   args: Record<string, unknown>,
 ): Promise<string> {
   const projectPath = path.resolve((args.projectPath as string) || process.cwd());
+  maybeRegisterFromTool(projectPath);
 
   // Auto-start watcher on any graph interaction (fire-and-forget)
   ensureWatcherStarted(projectPath);
