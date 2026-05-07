@@ -5,6 +5,7 @@ import http from "node:http";
 import type { AddressInfo } from "node:net";
 import { buildServer } from "../server-shared.js";
 import { logger } from "../services/logger.js";
+import { handleAdminRequest } from "./admin-server.js";
 import { connectStreamableHttp } from "./transport.js";
 
 const DEFAULT_PORT = 23700;
@@ -38,6 +39,10 @@ export async function startDaemonServer(): Promise<DaemonServerHandle> {
       const reportedPort = (httpServer.address() as AddressInfo | null)?.port ?? requestedPort;
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ ok: true, port: reportedPort, bind }));
+      return;
+    }
+    if (req.url?.startsWith("/admin/")) {
+      await handleAdminRequest(req, res);
       return;
     }
     if (req.url?.startsWith("/mcp")) {
