@@ -153,7 +153,7 @@ export function buildServer(): McpServer {
 
   server.tool(
     "codebase_status",
-    "Check index status: chunk count, indexing progress (%), last completed operation, file watcher state. Call after codebase_index to poll until 100% complete.",
+    "Check index status: chunk count, indexing progress (%), last completed operation, file watcher state. In daemon mode, also reports watcher activity, repoId, and current branch for the queried path. Call after codebase_index to poll until 100% complete.",
     {
       projectPath: z
         .string()
