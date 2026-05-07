@@ -52,8 +52,14 @@ async function main() {
   const subcommand = process.argv[2];
 
   if (subcommand === "daemon") {
-    const { main: daemonMain } = await import("./daemon/index.js");
-    const code = await daemonMain();
+    const rest = process.argv.slice(3);
+    if (rest.length === 0) {
+      const { main: daemonMain } = await import("./daemon/index.js");
+      const code = await daemonMain();
+      process.exit(code);
+    }
+    const { main: cliMain } = await import("./cli/daemon-cli.js");
+    const code = await cliMain(rest);
     process.exit(code);
   }
   if (subcommand === "migrate-legacy-keying") {
