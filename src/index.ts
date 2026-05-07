@@ -441,6 +441,14 @@ server.tool(
 // ── Start server ─────────────────────────────────────────────────────────
 
 async function main() {
+  const subcommand = process.argv[2];
+
+  if (subcommand === "migrate-legacy-keying") {
+    const { main: migrateMain } = await import("./cli/migrate-legacy-keying.js");
+    const code = await migrateMain(process.argv.slice(3));
+    process.exit(code);
+  }
+
   const transport = new StdioServerTransport();
   await server.connect(transport);
 
