@@ -4,6 +4,12 @@ All notable changes to SocratiCode are documented here.
 This project uses [Conventional Commits](https://www.conventionalcommits.org/) and [Semantic Versioning](https://semver.org/).
 
 
+## [1.8.9](https://github.com/giancarloerra/socraticode/compare/v1.8.8...v1.8.9) (2026-05-07)
+
+### Bug Fixes
+
+* **qdrant:** wrap propagated client errors with operation context ([#55](https://github.com/giancarloerra/socraticode/issues/55)) ([f22b4d1](https://github.com/giancarloerra/socraticode/commit/f22b4d128fa058877dae6efce212a47ef37057b2))
+
 ## [1.8.8](https://github.com/giancarloerra/socraticode/compare/v1.8.7...v1.8.8) (2026-05-06)
 
 ### Features
