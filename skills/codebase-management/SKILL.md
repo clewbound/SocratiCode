@@ -96,3 +96,41 @@ Supported types: SQL schemas, OpenAPI/Protobuf API specs, Terraform/CloudFormati
 | `EXTRA_EXTENSIONS` | — | Additional file extensions to index (e.g. `.tpl,.blade,.hbs`) |
 
 For full parameter details on every tool, see [references/tool-reference.md](references/tool-reference.md).
+
+## Daemon mode (when SOCRATICODE_DAEMON_MODE=true / `.mcp.json` points at http://...)
+
+When SocratiCode runs as a daemon (instead of stdio MCP), management lives in
+the CLI rather than in MCP tools. This keeps MCP tool context lean.
+
+### CLI commands
+
+The daemon binary doubles as a CLI client when called with a subcommand:
+
+- `socraticode daemon status` — daemon health, port, pid, uptime
+- `socraticode daemon watchlist` — list registered paths + state (branch, last-indexed)
+- `socraticode daemon watch <path> [--no-sticky]` — register path explicitly (sticky=skip GC inactivity)
+- `socraticode daemon unwatch <path> [--gc-collections]` — drop path (optionally GC its repo's collections)
+- `socraticode daemon gc [--dry-run]` — run watchlist + collection GC sweeps on demand
+
+These commands talk to the daemon over `localhost:23700/admin/*`. You can curl
+them directly if you want JSON.
+
+### Common debugging flows
+
+- "Why is my search stale?" → `socraticode daemon watchlist` to confirm the path is registered, then `codebase_status({projectPath})` MCP call to inspect index state.
+- "I deleted a worktree" → `socraticode daemon unwatch <path> --gc-collections`.
+- "Qdrant is full of old branches" → `socraticode daemon gc --dry-run`, review, then run without `--dry-run`.
+- "Daemon won't start" → check `lsof -i :23700` for port conflict, and tail the file specified by `SOCRATICODE_LOG_FILE`.
+
+### Migrating from per-session stdio mode
+
+1. Stop all running socraticode stdio processes (kill any `npx socraticode` workers).
+2. Start the daemon: `socraticode daemon` (foreground) or via launchd (see `DAEMON.md`).
+3. Update `.mcp.json` to use the HTTP transport:
+   ```jsonc
+   "socraticode": {
+     "type": "http",
+     "url": "http://127.0.0.1:23700/mcp"
+   }
+   ```
+4. If you previously used `SOCRATICODE_BRANCH_AWARE=true`, run `socraticode migrate-legacy-keying` to preserve indexed branches.

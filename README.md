@@ -933,44 +933,19 @@ socraticode migrate-legacy-keying --force
 Migration is idempotent (gated by a marker file in `~/Library/Application Support/socraticode/`
 on macOS or `~/.local/state/socraticode/` on Linux).
 
-### Daemon mode (opt-in)
+### Running as a daemon
 
-Run a single long-lived daemon instead of per-session MCP processes:
-
-```bash
-socraticode daemon
-# Listening on http://127.0.0.1:23700/mcp
-```
-
-Then point your MCP client at it via `.mcp.json`:
-
-```jsonc
-{
-  "mcpServers": {
-    "socraticode": {
-      "type": "http",
-      "url": "http://127.0.0.1:23700/mcp"
-    }
-  }
-}
-```
-
-Daemon mode implies `SOCRATICODE_REPO_KEYING=true` (so collections are keyed by
-`<repoId>__<branch>` rather than path-hash). For diagnostics, set
-`SOCRATICODE_LOG_FILE` to capture structured logs to a file across reconnects:
+For multi-worktree workflows or if you want a single SocratiCode process serving
+all your MCP clients, see [DAEMON.md](DAEMON.md). Quick path:
 
 ```bash
-SOCRATICODE_LOG_FILE=/tmp/socraticode-daemon.log socraticode daemon
+socraticode daemon &
+# Update .mcp.json: "type": "http", "url": "http://127.0.0.1:23700/mcp"
 ```
 
-Optional env vars:
-
-- `SOCRATICODE_DAEMON_PORT` (default `23700`) — bind port. Set to `0` to use an
-  ephemeral port (mostly useful for tests).
-- `SOCRATICODE_DAEMON_BIND` (default `127.0.0.1`) — bind address.
-
-For production setups, see `DAEMON.md` for launchd plist, GC, and management
-CLI (coming in subsequent releases).
+DAEMON.md covers launchd/systemd autostart, env-var reference, GC tuning,
+admin CLI (`socraticode daemon status|watchlist|watch|unwatch|gc`), migration
+from `SOCRATICODE_BRANCH_AWARE`, and troubleshooting.
 
 ### Available tools
 

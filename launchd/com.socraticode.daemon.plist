@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.socraticode.daemon</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/socraticode</string>
+        <string>daemon</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>SOCRATICODE_LOG_FILE</key>
+        <string>/tmp/socraticode-daemon.log</string>
+        <key>SOCRATICODE_REPO_KEYING</key>
+        <string>true</string>
+        <!-- Add your QDRANT_*, OLLAMA_* env here -->
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/socraticode-daemon.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/socraticode-daemon.err.log</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>
