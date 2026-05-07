@@ -234,6 +234,42 @@ export async function terminateLockHolder(projectPath: string, operation: string
 }
 
 /**
+ * Remove lock files that are stale (no live process holds them).
+ *
+ * Called on daemon startup so that lock files orphaned by a previous daemon
+ * crash don't confuse future operations or linger forever in the temp dir.
+ * `proper-lockfile` already enforces staleness via `STALE_MS` on `acquire`,
+ * so the practical effect here is hygiene: cleaning leftover sentinel files
+ * that no longer correspond to a live owner.
+ *
+ * Best-effort: never throws. Skips proper-lockfile's nested `*.lock` directories.
+ */
+export async function cleanupStaleLocks(): Promise<void> {
+  ensureLockDir();
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(LOCK_DIR);
+  } catch {
+    return;
+  }
+  for (const name of entries) {
+    // proper-lockfile creates a sibling `<name>.lock` directory while a lock
+    // is held; skip those — `lockfile.check` operates on the underlying file.
+    if (name.endsWith(".lock")) continue;
+    const filePath = path.join(LOCK_DIR, name);
+    try {
+      const locked = await lockfile.check(filePath, { stale: STALE_MS, realpath: false });
+      if (locked) continue; // live lock — leave alone
+      // Stale: remove the lock file (proper-lockfile will recreate on next acquire)
+      fs.unlinkSync(filePath);
+      logger.info("cleaned up stale lock file", { path: filePath });
+    } catch {
+      // best-effort
+    }
+  }
+}
+
+/**
  * Release all locks held by this process.
  * Called during graceful shutdown.
  */
