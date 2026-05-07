@@ -176,6 +176,13 @@ export async function registerPath(p: string, via: "implicit" | "explicit"): Pro
     /* watcher logs its own errors */
   });
 
+  // Start a HEAD-flip watcher for this commonDir (idempotent — second call on
+  // the same commonDir is a no-op). Lazy-imported to avoid a circular import:
+  // head-handler.ts → watchlist.ts → head-watcher.ts.
+  if (commonDir) {
+    await ensureHeadWatcherStarted(commonDir);
+  }
+
   // Auto-expand siblings (only for git checkouts).
   if (commonDir) {
     const siblings = await listWorktrees(resolved);
@@ -220,6 +227,28 @@ export function maybeRegisterFromTool(p: string): void {
   registerPath(root, "implicit").catch(() => {
     /* best-effort */
   });
+}
+
+/**
+ * Lazy-loaded helper that starts a HEAD watcher for a commonDir. Lazy-imported
+ * because head-handler.ts pulls watchlist.ts back in via the watchlist
+ * lookup helpers, and a static import would form a cycle.
+ */
+async function ensureHeadWatcherStarted(commonDir: string): Promise<void> {
+  try {
+    const [{ startHeadWatcher }, { defaultHeadChangeHandler }] = await Promise.all([
+      import("./head-watcher.js"),
+      import("./head-handler.js"),
+    ]);
+    await startHeadWatcher(commonDir, {
+      onHeadChanged: defaultHeadChangeHandler(commonDir),
+    });
+  } catch (err) {
+    logger.warn("HEAD watcher failed to start during registerPath (degraded mode)", {
+      commonDir,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
 
 /**
