@@ -56,6 +56,7 @@
     "agents",
     "hooks",
     ".mcp.json",
+    "launchd",
     "LICENSE",
     "LICENSE-COMMERCIAL",
     "README.md",
