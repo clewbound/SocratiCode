@@ -35,6 +35,34 @@ async function withRetry<T>(
   throw lastError;
 }
 
+/**
+ * Wrap a Qdrant client error with operation context so callers further up the
+ * stack (and ultimately the MCP response) get a useful message instead of a
+ * bare "Internal Server Error". Preserves the original error via `cause` and
+ * surfaces the HTTP status code if the client attached one.
+ *
+ * Used at every catch-and-rethrow site whose intent is "let this propagate so
+ * callers don't mistake a transient blip for missing data". Wrapping at that
+ * boundary turns "Internal Server Error" into something like:
+ *   "loadProjectHashes(socraticode_<hash>) failed [status 500]: Internal Server Error"
+ */
+function wrapQdrantError(
+  operation: string,
+  context: Record<string, unknown>,
+  err: unknown,
+): Error {
+  const original = err instanceof Error ? err.message : String(err);
+  const status =
+    (err as { status?: number })?.status ?? (err as { statusCode?: number })?.statusCode;
+  const ctxStr = Object.entries(context)
+    .map(([k, v]) => `${k}=${typeof v === "string" ? v : JSON.stringify(v)}`)
+    .join(", ");
+  const statusStr = status ? ` [status ${status}]` : "";
+  const wrapped = new Error(`${operation}(${ctxStr}) failed${statusStr}: ${original}`);
+  (wrapped as Error & { cause?: unknown }).cause = err;
+  return wrapped;
+}
+
 let client: QdrantClient | null = null;
 
 export function getClient(): QdrantClient {
@@ -532,12 +560,13 @@ export async function getCollectionInfo(name: string): Promise<{
   } catch (err: unknown) {
     // Only return null for "not found" — propagate all other errors
     const message = err instanceof Error ? err.message : String(err);
-    const status = (err as { status?: number })?.status;
+    const status =
+      (err as { status?: number })?.status ?? (err as { statusCode?: number })?.statusCode;
     if (status === 404 || message.includes("Not found") || message.includes("doesn't exist") || message.includes("not found")) {
       return null;
     }
-    logger.warn("getCollectionInfo failed with unexpected error (propagating)", { collection: name, error: message });
-    throw err;
+    logger.warn("getCollectionInfo failed with unexpected error (propagating)", { collection: name, error: message, status });
+    throw wrapQdrantError("getCollectionInfo", { collection: name }, err);
   }
 }
 
@@ -656,11 +685,11 @@ export async function loadProjectHashes(collName: string): Promise<Map<string, s
     const hashObj = JSON.parse(payload.fileHashes as string) as Record<string, string>;
     return new Map(Object.entries(hashObj));
   } catch (err) {
-    logger.warn("loadProjectHashes failed (propagating)", {
-      collName,
-      error: err instanceof Error ? err.message : String(err),
-    });
-    throw err;
+    const message = err instanceof Error ? err.message : String(err);
+    const status =
+      (err as { status?: number })?.status ?? (err as { statusCode?: number })?.statusCode;
+    logger.warn("loadProjectHashes failed (propagating)", { collName, error: message, status });
+    throw wrapQdrantError("loadProjectHashes", { collName }, err);
   }
 }
 
