@@ -5,6 +5,8 @@ import fs from "node:fs";
 import { logger } from "../services/logger.js";
 import { gracefulShutdown } from "../services/startup.js";
 import { startWatching } from "../services/watcher.js";
+import { defaultHeadChangeHandler } from "./head-handler.js";
+import { startHeadWatcher } from "./head-watcher.js";
 import { detectLegacyCollections } from "./legacy-detect.js";
 import { type DaemonServerHandle, startDaemonServer } from "./server.js";
 import { watchlist } from "./watchlist.js";
@@ -79,8 +81,29 @@ async function initWatchlist(): Promise<void> {
   logger.info("watchlist initialized", { count: watchlist.entries().length });
 }
 
-/** Stub. Phase 5 will start a per-repo HEAD-flip watcher to swap branch
- *  collections when the user checks out a different branch. */
+/**
+ * Start one HEAD-flip watcher per unique commonDir referenced by the watchlist.
+ * The handler ({@link defaultHeadChangeHandler}) decides whether to reindex
+ * based on transient-marker presence and detached-HEAD state.
+ */
 async function initHeadWatcher(): Promise<void> {
-  // phase 5
+  const seen = new Set<string>();
+  for (const entry of watchlist.entries()) {
+    if (!entry.commonDir || seen.has(entry.commonDir)) continue;
+    seen.add(entry.commonDir);
+    try {
+      await startHeadWatcher(entry.commonDir, {
+        onHeadChanged: defaultHeadChangeHandler(entry.commonDir),
+      });
+    } catch (err) {
+      // HEAD-watcher failures are degraded-mode, not fatal. The
+      // file-watcher fallback in src/services/watcher.ts will opportunistically
+      // detect branch flips on file events.
+      logger.warn("HEAD watcher failed to start (degraded mode)", {
+        commonDir: entry.commonDir,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  logger.info("HEAD watchers initialized", { count: seen.size });
 }
