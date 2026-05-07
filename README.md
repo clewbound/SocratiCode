@@ -913,6 +913,26 @@ Cost scales linearly with actual file changes. A typical feature-branch checkout
 - Sibling clone fails partway (e.g. Qdrant connectivity blip) — SocratiCode logs the failure, drops the partial target, and falls through to a normal full index
 - Active merge conflict in the working tree (files at non-zero git stages are excluded from the blob-sha map, leading to a size mismatch)
 
+### Migrating from `BRANCH_AWARE` to repo-keying
+
+If you've been running `SOCRATICODE_BRANCH_AWARE=true`, your collections are
+keyed by `<pathhash>__<branch>`. Repo-keying (and daemon mode) uses
+`<repoId>__<branch>` instead. To preserve your indexed branches when upgrading:
+
+```bash
+# preview what would change:
+socraticode migrate-legacy-keying --dry-run
+
+# perform the migration:
+socraticode migrate-legacy-keying
+
+# already migrated, want to re-run:
+socraticode migrate-legacy-keying --force
+```
+
+Migration is idempotent (gated by a marker file in `~/Library/Application Support/socraticode/`
+on macOS or `~/.local/state/socraticode/` on Linux).
+
 ### Available tools
 
 Once connected, 21 tools are available to your AI assistant:
