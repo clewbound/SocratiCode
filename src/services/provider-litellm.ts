@@ -141,9 +141,17 @@ export class LiteLLMEmbeddingProvider implements EmbeddingProvider {
     // proxy unreachable (DNS/connection refused), bad credentials (401/403), or
     // proxy reachable but mis-configured (500/etc.). Distinguish them so the
     // operator gets a directly actionable hint.
-    let modelList: Awaited<ReturnType<typeof client.models.list>>;
+    //
+    // Iterate the SDK's auto-paginated AsyncIterable rather than reading
+    // .data directly. LiteLLM today returns the entire model_list in one
+    // page, so this is functionally a no-op; it keeps the membership check
+    // correct if a future LiteLLM build (or an upstream proxy) ever paginates
+    // /v1/models the way the OpenAI SDK already expects.
+    const allModelIds: string[] = [];
     try {
-      modelList = await client.models.list();
+      for await (const m of client.models.list()) {
+        allModelIds.push(m.id);
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       if (isAuthError(err)) {
@@ -168,9 +176,9 @@ export class LiteLLMEmbeddingProvider implements EmbeddingProvider {
     // missing the proxy will return a NotFoundError on every embed() call,
     // which is opaque under high concurrency. Fail early with a hint that
     // points at the proxy config rather than at the underlying provider.
-    const modelRegistered = modelList.data.some((m) => m.id === config.embeddingModel);
+    const modelRegistered = allModelIds.includes(config.embeddingModel);
     if (!modelRegistered) {
-      const known = modelList.data.map((m) => m.id).slice(0, 10).join(", ");
+      const known = allModelIds.slice(0, 10).join(", ");
       throw new Error(
         `LiteLLM is reachable at ${config.litellmUrl} but the embedding model ` +
         `"${config.embeddingModel}" is not registered on the proxy. ` +
@@ -236,10 +244,15 @@ export class LiteLLMEmbeddingProvider implements EmbeddingProvider {
 
     try {
       const client = getClient();
-      const models = await client.models.list();
+      // Same auto-pagination treatment as ensureReady — see the comment there
+      // for why we iterate rather than reading .data directly.
+      const allModelIds: string[] = [];
+      for await (const m of client.models.list()) {
+        allModelIds.push(m.id);
+      }
       lines.push(`${icon(true)} LiteLLM: Reachable at ${config.litellmUrl}`);
 
-      const modelRegistered = models.data.some((m) => m.id === config.embeddingModel);
+      const modelRegistered = allModelIds.includes(config.embeddingModel);
       lines.push(
         `${icon(modelRegistered)} Embedding model (${config.embeddingModel}): ` +
         (modelRegistered
