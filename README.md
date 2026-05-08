@@ -242,7 +242,7 @@ On VS Code's 2.45M‑line codebase, SocratiCode answers architectural questions 
 - **Hybrid code search** — Built on Qdrant, a purpose-built vector database with HNSW indexing, concurrent read/write, and payload filtering. Each chunk stores both a dense vector and a BM25 sparse vector; the Query API runs both sub-queries in a single round-trip and fuses results with Reciprocal Rank Fusion (RRF). Semantic search handles conceptual queries like "authentication middleware" even when those exact words don't appear in the code. BM25 handles exact identifier and keyword lookups. You get the best of both in every query with no tuning required.
 - **Configurable Qdrant** — Use the built-in Docker Qdrant (default, zero config) or connect to your own instance (self-hosted, remote server, or Qdrant Cloud). Configure via `QDRANT_MODE`, `QDRANT_URL`, and `QDRANT_API_KEY` environment variables.
 - **Configurable Ollama** — Use the built-in Docker Ollama (default, zero config) or point to your own Ollama instance (native install -GPU access-, remote server, etc.). Configure via `OLLAMA_MODE`, `OLLAMA_URL`, `EMBEDDING_MODEL` and `EMBEDDING_DIMENSIONS` environment variables.
-- **Multi-provider embeddings** — Switch between Local Ollama (private, GPU access), Docker Ollama (zero-config), OpenAI (`text-embedding-3-small`, fastest), Google Gemini (`gemini-embedding-001`, free tier), or LM Studio (local OpenAI-compatible server) with a single environment variable. No provider-specific configuration files.
+- **Multi-provider embeddings** — Switch between Local Ollama (private, GPU access), Docker Ollama (zero-config), OpenAI (`text-embedding-3-small`, fastest), Google Gemini (`gemini-embedding-001`, free tier), LM Studio (local OpenAI-compatible server), or LiteLLM (proxy gateway in front of 100+ providers) with a single environment variable. No provider-specific configuration files.
 - **Private & secure** — Everything runs on your machine — your code never leaves your network. The default Docker setup includes Ollama (embeddings) and Qdrant (vector storage) with no external API calls. No API costs, no token limits. Suitable for air-gapped and on-premises environments. Optional cloud providers (OpenAI, Google Gemini, Qdrant Cloud) are available but never required.
 - **AST-aware chunking** — Files are split at function/class boundaries using AST parsing (ast-grep), not arbitrary line counts. This produces higher-quality search results. Falls back to line-based chunking for unsupported languages.
 - **Polyglot code dependency graph** — Static analysis of import/require/use/include statements using ast-grep for 18+ languages. No external tools like dependency-cruiser required. Detects circular dependencies and generates visual Mermaid diagrams.
@@ -717,6 +717,42 @@ or when you want a Mac/Windows-friendly desktop UI for managing GGUF models).
 > Optional: `LMSTUDIO_URL` (default `http://localhost:1234/v1`) for non-default ports;
 > `LMSTUDIO_API_KEY` if you've enabled API key auth in LM Studio.
 
+#### LiteLLM (proxy gateway, 100+ providers)
+
+[LiteLLM](https://docs.litellm.ai/docs/simple_proxy) Proxy Server exposes an OpenAI-compatible
+`/v1/embeddings` endpoint and fans out to any of 100+ underlying providers (OpenAI, Anthropic,
+Cohere, Voyage, HuggingFace, Bedrock, Vertex AI, Ollama, ...). Use this provider when you want
+**centralised key management** (one virtual key per developer instead of N provider keys spread
+across MCP configs), **fallback / load balancing** between embedding backends, or
+**provider-agnostic indexes** that survive a backend swap.
+
+```json
+{
+  "mcpServers": {
+    "socraticode": {
+      "command": "node",
+      "args": ["/absolute/path/to/socraticode/dist/index.js"],
+      "env": {
+        "EMBEDDING_PROVIDER": "litellm",
+        "LITELLM_API_KEY": "sk-...",
+        "EMBEDDING_MODEL": "text-embedding-3-small",
+        "EMBEDDING_DIMENSIONS": "1536"
+      }
+    }
+  }
+}
+```
+
+> **`LITELLM_API_KEY`, `EMBEDDING_MODEL`, and `EMBEDDING_DIMENSIONS` are all required.**
+> LiteLLM proxies always authenticate (master key or virtual key from `/key/generate`); the
+> alias name and underlying dimension come from your `config.yaml`. SocratiCode fails fast on
+> any missing piece.
+>
+> Optional: `LITELLM_URL` (default `http://localhost:4000/v1`) — must include the `/v1`
+> suffix; `LITELLM_SEND_DIMENSIONS=true` to forward the OpenAI `dimensions` parameter
+> through the proxy (only safe for Matryoshka-aware backends like `text-embedding-3-*` or
+> `voyage-3` — non-Matryoshka backends reject the request).
+
 ### Git Worktrees (shared index across directories)
 
 If you use [git worktrees](https://git-scm.com/docs/git-worktree) — or any workflow where the same repository lives in multiple directories — each path would normally get its own Qdrant index. This means redundant embedding and storage for what is essentially the same codebase.
@@ -1118,10 +1154,10 @@ The rest of this section documents the variables themselves. Pass them using whi
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `EMBEDDING_PROVIDER` | `ollama` | Embedding backend: `ollama` (local, default), `openai`, `google`, or `lmstudio` |
-| `EMBEDDING_MODEL` | *(per provider)* | Model name. Defaults: `nomic-embed-text` (ollama), `text-embedding-3-small` (openai), `gemini-embedding-001` (google). **Required** for `lmstudio` (no default). |
-| `EMBEDDING_DIMENSIONS` | *(per provider)* | Vector dimensions. Defaults: `768` (ollama), `1536` (openai), `3072` (google). **Required** for `lmstudio` (no default; varies per loaded model). |
-| `EMBEDDING_CONTEXT_LENGTH` | *(auto-detected)* | Model context window in tokens. Auto-detected for known models. Set manually for custom or LM Studio models. |
+| `EMBEDDING_PROVIDER` | `ollama` | Embedding backend: `ollama` (local, default), `openai`, `google`, `lmstudio`, or `litellm` |
+| `EMBEDDING_MODEL` | *(per provider)* | Model name. Defaults: `nomic-embed-text` (ollama), `text-embedding-3-small` (openai), `gemini-embedding-001` (google). **Required** for `lmstudio` and `litellm` (no default). |
+| `EMBEDDING_DIMENSIONS` | *(per provider)* | Vector dimensions. Defaults: `768` (ollama), `1536` (openai), `3072` (google). **Required** for `lmstudio` and `litellm` (no default; varies per loaded model / proxy alias). |
+| `EMBEDDING_CONTEXT_LENGTH` | *(auto-detected)* | Model context window in tokens. Auto-detected for known model names (works for LiteLLM aliases that match the underlying model name). Set manually for custom LM Studio models or arbitrary LiteLLM aliases. |
 
 ### Ollama Configuration (when `EMBEDDING_PROVIDER=ollama`)
 
@@ -1146,6 +1182,14 @@ The rest of this section documents the variables themselves. Pass them using whi
 |----------|---------|-------------|
 | `LMSTUDIO_URL` | `http://localhost:1234/v1` | Full base URL of LM Studio's OpenAI-compatible Local Server. Override when the server runs on a non-default port or a remote machine (e.g. `http://gpu-rig.local:5678/v1`). Must include the `/v1` suffix. |
 | `LMSTUDIO_API_KEY` | *(none)* | Optional. LM Studio's Local Server has no auth by default; set this only if you've enabled API key auth in the LM Studio UI. |
+
+### LiteLLM Configuration (when `EMBEDDING_PROVIDER=litellm`)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LITELLM_URL` | `http://localhost:4000/v1` | Full base URL of the LiteLLM proxy's OpenAI-compatible endpoint. Override for non-default ports or remote proxies (e.g. `https://litellm.internal:4001/v1`). Must include the `/v1` suffix — LiteLLM exposes `/v1/embeddings` under that prefix. |
+| `LITELLM_API_KEY` | *(none)* | **Required.** Master key (`general_settings.master_key` in the proxy's `config.yaml`) or a virtual key issued via LiteLLM's `/key/generate` endpoint. Unlike LM Studio, LiteLLM always authenticates — `/v1/models` itself is gated. |
+| `LITELLM_SEND_DIMENSIONS` | `false` | Opt-in (`true` / `1` / `yes`). Forwards the OpenAI-style `dimensions` parameter through the proxy. Safe only for Matryoshka-aware backends (`text-embedding-3-*`, `voyage-3`); other backends (BGE, `nomic-embed-text`, Cohere v3) reject the request. Leave unset unless you know your alias resolves to a Matryoshka model. |
 
 ### Qdrant Configuration
 

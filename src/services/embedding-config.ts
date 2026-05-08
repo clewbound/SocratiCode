@@ -9,6 +9,10 @@
  *   - "google": Use Google Generative AI Embedding API. Requires GOOGLE_API_KEY.
  *   - "lmstudio": Use a local LM Studio server (OpenAI-compatible). Requires
  *                 EMBEDDING_MODEL and EMBEDDING_DIMENSIONS to be set explicitly.
+ *   - "litellm": Use a LiteLLM proxy server (OpenAI-compatible gateway in front of
+ *                100+ underlying providers). Requires LITELLM_API_KEY,
+ *                EMBEDDING_MODEL (must match an alias in the proxy's config.yaml),
+ *                and EMBEDDING_DIMENSIONS (the alias's underlying dim).
  *
  * Ollama-specific:
  *   OLLAMA_MODE:
@@ -34,6 +38,18 @@
  *   LMSTUDIO_API_KEY:      Optional API key. LM Studio's Local Server has no auth by default;
  *                          set this only if you've enabled an API key in LM Studio.
  *
+ * LiteLLM-specific:
+ *   LITELLM_URL:               OpenAI-compatible base URL of the LiteLLM proxy.
+ *                              Default: http://localhost:4000/v1 (the /v1 suffix is required;
+ *                              LiteLLM exposes /v1/embeddings under that prefix).
+ *   LITELLM_API_KEY:           Required. Master key (general_settings.master_key) or a virtual
+ *                              key issued via /key/generate. Unlike LM Studio, the proxy always
+ *                              authenticates.
+ *   LITELLM_SEND_DIMENSIONS:   Opt-in ("true" / "1" / "yes"). Forwards the OpenAI-style
+ *                              `dimensions` parameter to the proxy for Matryoshka-aware
+ *                              underlying models (text-embedding-3-*, voyage-3). Default off
+ *                              because non-Matryoshka backends reject it.
+ *
  * Shared:
  *   EMBEDDING_MODEL:       Model name (default depends on provider; required for lmstudio).
  *   EMBEDDING_DIMENSIONS:  Vector dimensions — must match the model (default depends on
@@ -45,7 +61,7 @@ import { logger } from "./logger.js";
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
-export type EmbeddingProvider = "ollama" | "openai" | "google" | "lmstudio";
+export type EmbeddingProvider = "ollama" | "openai" | "google" | "lmstudio" | "litellm";
 export type OllamaMode = "docker" | "external" | "auto";
 
 export interface EmbeddingConfig {
@@ -57,6 +73,8 @@ export interface EmbeddingConfig {
   ollamaUrl: string;
   /** LM Studio OpenAI-compatible base URL (only relevant when embeddingProvider is "lmstudio"). */
   lmstudioUrl: string;
+  /** LiteLLM proxy OpenAI-compatible base URL (only relevant when embeddingProvider is "litellm"). */
+  litellmUrl: string;
   embeddingModel: string;
   embeddingDimensions: number;
   /** Max context window in tokens. Used for client-side pre-truncation. */
@@ -67,15 +85,17 @@ export interface EmbeddingConfig {
 // ── Provider defaults ─────────────────────────────────────────────────────
 
 /**
- * lmstudio has empty defaults: LM Studio has no out-of-the-box model — users must load
- * one in the UI and choose dimensions to match. We fail-fast in loadEmbeddingConfig()
- * when the user picks lmstudio without setting EMBEDDING_MODEL / EMBEDDING_DIMENSIONS.
+ * lmstudio and litellm have empty defaults: there's no canonical model — users
+ * pick one (the loaded LM Studio model, or a proxy alias from LiteLLM's
+ * config.yaml). We fail-fast in loadEmbeddingConfig() when those providers are
+ * selected without explicit EMBEDDING_MODEL / EMBEDDING_DIMENSIONS.
  */
 const PROVIDER_DEFAULTS: Record<EmbeddingProvider, { model: string; dimensions: number }> = {
   ollama:   { model: "nomic-embed-text",        dimensions: 768  },
   openai:   { model: "text-embedding-3-small",  dimensions: 1536 },
   google:   { model: "gemini-embedding-001",    dimensions: 3072 },
   lmstudio: { model: "",                        dimensions: 0    },
+  litellm:  { model: "",                        dimensions: 0    },
 };
 
 // ── Ollama mode defaults ──────────────────────────────────────────────────
@@ -130,10 +150,11 @@ export function loadEmbeddingConfig(): EmbeddingConfig {
     rawProvider !== "ollama" &&
     rawProvider !== "openai" &&
     rawProvider !== "google" &&
-    rawProvider !== "lmstudio"
+    rawProvider !== "lmstudio" &&
+    rawProvider !== "litellm"
   ) {
     throw new Error(
-      `Invalid EMBEDDING_PROVIDER: "${rawProvider}". Must be "ollama", "openai", "google", or "lmstudio".`,
+      `Invalid EMBEDDING_PROVIDER: "${rawProvider}". Must be "ollama", "openai", "google", "lmstudio", or "litellm".`,
     );
   }
   const embeddingProvider: EmbeddingProvider = rawProvider;
@@ -155,6 +176,38 @@ export function loadEmbeddingConfig(): EmbeddingConfig {
         "Different LM Studio models have different output dimensions — check the model card " +
         "and set EMBEDDING_DIMENSIONS accordingly (e.g. 768 for nomic-embed-text-v1.5, " +
         "1024 for bge-large-en-v1.5, 4096 for qwen3-embedding-8b).",
+      );
+    }
+  }
+
+  // LiteLLM proxy aliases are user-defined in config.yaml — there is no canonical
+  // default model name and the underlying dimension depends on which provider the
+  // alias resolves to. Authentication is also mandatory (the proxy enforces it
+  // even for read-only /v1/models). Fail fast on each missing piece so the
+  // operator gets a single, specific error rather than a generic 401 / 404 from
+  // the proxy at first embed().
+  if (embeddingProvider === "litellm") {
+    if (!process.env.LITELLM_API_KEY) {
+      throw new Error(
+        "LITELLM_API_KEY is required when EMBEDDING_PROVIDER=litellm. " +
+        "Set it to the proxy's master key (general_settings.master_key in config.yaml) " +
+        "or to a virtual key issued via LiteLLM's /key/generate endpoint.",
+      );
+    }
+    if (!process.env.EMBEDDING_MODEL) {
+      throw new Error(
+        "EMBEDDING_MODEL is required when EMBEDDING_PROVIDER=litellm. " +
+        "Set it to a model_name from your LiteLLM config.yaml (e.g. EMBEDDING_MODEL=text-embedding-3-small " +
+        "if your proxy aliases that name; LiteLLM rewrites the call to whichever litellm_params.model " +
+        "is configured under that alias).",
+      );
+    }
+    if (!process.env.EMBEDDING_DIMENSIONS) {
+      throw new Error(
+        "EMBEDDING_DIMENSIONS is required when EMBEDDING_PROVIDER=litellm. " +
+        "The proxy alias maps to an underlying model whose dimension we cannot infer — set this to the " +
+        "underlying model's output dim (e.g. 1536 for text-embedding-3-small, 1024 for voyage-2, " +
+        "768 for nomic-embed-text-v1.5).",
       );
     }
   }
@@ -188,6 +241,7 @@ export function loadEmbeddingConfig(): EmbeddingConfig {
     ollamaMode,
     ollamaUrl: process.env.OLLAMA_URL || modeDefaults.url,
     lmstudioUrl: process.env.LMSTUDIO_URL || "http://localhost:1234/v1",
+    litellmUrl: process.env.LITELLM_URL || "http://localhost:4000/v1",
     embeddingModel,
     embeddingDimensions,
     embeddingContextLength: contextLengthEnv
@@ -213,6 +267,10 @@ export function loadEmbeddingConfig(): EmbeddingConfig {
     ...(embeddingProvider === "lmstudio" ? {
       lmstudioUrl: _config.lmstudioUrl,
     } : {}),
+    ...(embeddingProvider === "litellm" ? {
+      litellmUrl: _config.litellmUrl,
+      sendDimensions: !!process.env.LITELLM_SEND_DIMENSIONS,
+    } : {}),
     embeddingModel: _config.embeddingModel,
     embeddingDimensions: _config.embeddingDimensions,
     embeddingContextLength: _config.embeddingContextLength || "auto",
@@ -224,7 +282,9 @@ export function loadEmbeddingConfig(): EmbeddingConfig {
           ? process.env.GOOGLE_API_KEY
           : embeddingProvider === "lmstudio"
             ? process.env.LMSTUDIO_API_KEY
-            : undefined),
+            : embeddingProvider === "litellm"
+              ? process.env.LITELLM_API_KEY
+              : undefined),
   });
 
   return _config;
