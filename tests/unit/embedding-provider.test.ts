@@ -21,6 +21,9 @@ describe("embedding-provider", () => {
     delete process.env.GOOGLE_API_KEY;
     delete process.env.LMSTUDIO_URL;
     delete process.env.LMSTUDIO_API_KEY;
+    delete process.env.LITELLM_URL;
+    delete process.env.LITELLM_API_KEY;
+    delete process.env.LITELLM_SEND_DIMENSIONS;
   });
 
   afterEach(() => {
@@ -53,6 +56,15 @@ describe("embedding-provider", () => {
       process.env.EMBEDDING_DIMENSIONS = "768";
       const provider = await getEmbeddingProvider();
       expect(provider.name).toBe("lmstudio");
+    });
+
+    it("creates LiteLLMEmbeddingProvider when configured", async () => {
+      process.env.EMBEDDING_PROVIDER = "litellm";
+      process.env.LITELLM_API_KEY = "sk-master-test";
+      process.env.EMBEDDING_MODEL = "text-embedding-3-small";
+      process.env.EMBEDDING_DIMENSIONS = "1536";
+      const provider = await getEmbeddingProvider();
+      expect(provider.name).toBe("litellm");
     });
 
     it("caches provider instance", async () => {
@@ -199,5 +211,91 @@ describe("LMStudioEmbeddingProvider", () => {
 
     const provider = await getEmbeddingProvider();
     expect(provider.name).toBe("lmstudio");
+  });
+});
+
+describe("LiteLLMEmbeddingProvider", () => {
+  const originalEnv = { ...process.env };
+
+  beforeEach(() => {
+    resetEmbeddingConfig();
+    resetEmbeddingProvider();
+    delete process.env.EMBEDDING_PROVIDER;
+    delete process.env.EMBEDDING_MODEL;
+    delete process.env.EMBEDDING_DIMENSIONS;
+    delete process.env.EMBEDDING_CONTEXT_LENGTH;
+    delete process.env.LITELLM_URL;
+    delete process.env.LITELLM_API_KEY;
+    delete process.env.LITELLM_SEND_DIMENSIONS;
+  });
+
+  afterEach(() => {
+    resetEmbeddingConfig();
+    resetEmbeddingProvider();
+    process.env = { ...originalEnv };
+  });
+
+  it("config validation rejects construction when LITELLM_API_KEY is missing", async () => {
+    // The API key is checked at config-load time (loadEmbeddingConfig), not at
+    // factory invocation, so the throw surfaces inside getEmbeddingProvider().
+    process.env.EMBEDDING_PROVIDER = "litellm";
+    process.env.EMBEDDING_MODEL = "text-embedding-3-small";
+    process.env.EMBEDDING_DIMENSIONS = "1536";
+    // Intentionally no LITELLM_API_KEY.
+
+    await expect(getEmbeddingProvider()).rejects.toThrow(/LITELLM_API_KEY is required/);
+  });
+
+  it("ensureReady throws an actionable error when the proxy is unreachable", async () => {
+    process.env.EMBEDDING_PROVIDER = "litellm";
+    process.env.LITELLM_API_KEY = "sk-master-test";
+    process.env.EMBEDDING_MODEL = "text-embedding-3-small";
+    process.env.EMBEDDING_DIMENSIONS = "1536";
+    // Closed port → SDK fails fast with a connection error, not an auth error.
+    process.env.LITELLM_URL = "http://127.0.0.1:1/v1";
+
+    const provider = await getEmbeddingProvider();
+    await expect(provider.ensureReady()).rejects.toThrow(
+      /LiteLLM proxy is not reachable at http:\/\/127\.0\.0\.1:1\/v1/,
+    );
+  });
+
+  it("healthCheck reports missing API key without making any network call", async () => {
+    process.env.EMBEDDING_PROVIDER = "litellm";
+    process.env.LITELLM_API_KEY = "sk-master-test";
+    process.env.EMBEDDING_MODEL = "text-embedding-3-small";
+    process.env.EMBEDDING_DIMENSIONS = "1536";
+    // Even with a deliberately closed port, missing-key path must short-circuit
+    // before the SDK attempts a connection, so the test stays deterministic.
+    process.env.LITELLM_URL = "http://127.0.0.1:1/v1";
+
+    const provider = await getEmbeddingProvider();
+    // Now drop the key for the health-check call only — the provider re-reads
+    // process.env on each invocation (intentional, see provider-litellm.ts).
+    delete process.env.LITELLM_API_KEY;
+
+    const health = await provider.healthCheck();
+    expect(health.available).toBe(false);
+    expect(health.modelReady).toBe(false);
+    expect(health.statusLines.some((l) => l.includes("LiteLLM API key") && l.includes("Missing"))).toBe(true);
+  });
+
+  it("healthCheck reports unreachable proxy without throwing", async () => {
+    process.env.EMBEDDING_PROVIDER = "litellm";
+    process.env.LITELLM_API_KEY = "sk-master-test";
+    process.env.EMBEDDING_MODEL = "text-embedding-3-small";
+    process.env.EMBEDDING_DIMENSIONS = "1536";
+    process.env.LITELLM_URL = "http://127.0.0.1:1/v1";
+
+    const provider = await getEmbeddingProvider();
+    const health = await provider.healthCheck();
+
+    expect(health.available).toBe(false);
+    expect(health.modelReady).toBe(false);
+    expect(
+      health.statusLines.some(
+        (l) => l.includes("LiteLLM") && l.includes("Not reachable"),
+      ),
+    ).toBe(true);
   });
 });

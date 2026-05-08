@@ -24,6 +24,9 @@ describe("embedding-config", () => {
     delete process.env.GOOGLE_API_KEY;
     delete process.env.LMSTUDIO_URL;
     delete process.env.LMSTUDIO_API_KEY;
+    delete process.env.LITELLM_URL;
+    delete process.env.LITELLM_API_KEY;
+    delete process.env.LITELLM_SEND_DIMENSIONS;
   });
 
   afterEach(() => {
@@ -181,6 +184,7 @@ describe("embedding-config", () => {
         ollamaMode: "external",
         ollamaUrl: "http://remote-gpu:11434",
         lmstudioUrl: "http://localhost:1234/v1",
+        litellmUrl: "http://localhost:4000/v1",
         embeddingModel: "mxbai-embed-large",
         embeddingDimensions: 1024,
         embeddingContextLength: 512,
@@ -218,7 +222,7 @@ describe("embedding-config", () => {
     it("throws for invalid EMBEDDING_PROVIDER", () => {
       process.env.EMBEDDING_PROVIDER = "anthropic";
       expect(() => loadEmbeddingConfig()).toThrow(
-        'Invalid EMBEDDING_PROVIDER: "anthropic". Must be "ollama", "openai", "google", or "lmstudio".',
+        'Invalid EMBEDDING_PROVIDER: "anthropic". Must be "ollama", "openai", "google", "lmstudio", or "litellm".',
       );
     });
 
@@ -327,6 +331,115 @@ describe("embedding-config", () => {
 
       const config = loadEmbeddingConfig();
       expect(config.embeddingContextLength).toBe(32768);
+    });
+  });
+
+  describe("litellm provider", () => {
+    it("loads when API key, model, and dimensions are all set", () => {
+      process.env.EMBEDDING_PROVIDER = "litellm";
+      process.env.LITELLM_API_KEY = "sk-master-test";
+      process.env.EMBEDDING_MODEL = "text-embedding-3-small";
+      process.env.EMBEDDING_DIMENSIONS = "1536";
+
+      const config = loadEmbeddingConfig();
+      expect(config.embeddingProvider).toBe("litellm");
+      expect(config.embeddingModel).toBe("text-embedding-3-small");
+      expect(config.embeddingDimensions).toBe(1536);
+    });
+
+    it("defaults LITELLM_URL to http://localhost:4000/v1", () => {
+      process.env.EMBEDDING_PROVIDER = "litellm";
+      process.env.LITELLM_API_KEY = "sk-master-test";
+      process.env.EMBEDDING_MODEL = "text-embedding-3-small";
+      process.env.EMBEDDING_DIMENSIONS = "1536";
+
+      const config = loadEmbeddingConfig();
+      expect(config.litellmUrl).toBe("http://localhost:4000/v1");
+    });
+
+    it("respects LITELLM_URL override", () => {
+      process.env.EMBEDDING_PROVIDER = "litellm";
+      process.env.LITELLM_API_KEY = "sk-master-test";
+      process.env.EMBEDDING_MODEL = "voyage-2";
+      process.env.EMBEDDING_DIMENSIONS = "1024";
+      process.env.LITELLM_URL = "https://litellm.internal:4001/v1";
+
+      const config = loadEmbeddingConfig();
+      expect(config.litellmUrl).toBe("https://litellm.internal:4001/v1");
+    });
+
+    it("throws when LITELLM_API_KEY is missing", () => {
+      process.env.EMBEDDING_PROVIDER = "litellm";
+      process.env.EMBEDDING_MODEL = "text-embedding-3-small";
+      process.env.EMBEDDING_DIMENSIONS = "1536";
+
+      expect(() => loadEmbeddingConfig()).toThrow(
+        /LITELLM_API_KEY is required when EMBEDDING_PROVIDER=litellm/,
+      );
+    });
+
+    it("throws when EMBEDDING_MODEL is missing", () => {
+      process.env.EMBEDDING_PROVIDER = "litellm";
+      process.env.LITELLM_API_KEY = "sk-master-test";
+      process.env.EMBEDDING_DIMENSIONS = "1536";
+
+      expect(() => loadEmbeddingConfig()).toThrow(
+        /EMBEDDING_MODEL is required when EMBEDDING_PROVIDER=litellm/,
+      );
+    });
+
+    it("throws when EMBEDDING_DIMENSIONS is missing", () => {
+      process.env.EMBEDDING_PROVIDER = "litellm";
+      process.env.LITELLM_API_KEY = "sk-master-test";
+      process.env.EMBEDDING_MODEL = "text-embedding-3-small";
+
+      expect(() => loadEmbeddingConfig()).toThrow(
+        /EMBEDDING_DIMENSIONS is required when EMBEDDING_PROVIDER=litellm/,
+      );
+    });
+
+    it("validates the API_KEY check before model/dimension checks", () => {
+      // All three are missing — the API key error must surface first because it's
+      // the only one a virtual-key user can fix without touching the proxy config.
+      process.env.EMBEDDING_PROVIDER = "litellm";
+
+      expect(() => loadEmbeddingConfig()).toThrow(
+        /LITELLM_API_KEY is required/,
+      );
+    });
+
+    it("includes example dimensions in the error message for discoverability", () => {
+      process.env.EMBEDDING_PROVIDER = "litellm";
+      process.env.LITELLM_API_KEY = "sk-master-test";
+      process.env.EMBEDDING_MODEL = "text-embedding-3-small";
+
+      expect(() => loadEmbeddingConfig()).toThrow(
+        /1536 for text-embedding-3-small/,
+      );
+    });
+
+    it("respects EMBEDDING_CONTEXT_LENGTH override for unknown proxy aliases", () => {
+      process.env.EMBEDDING_PROVIDER = "litellm";
+      process.env.LITELLM_API_KEY = "sk-master-test";
+      process.env.EMBEDDING_MODEL = "team-internal-bge-large";
+      process.env.EMBEDDING_DIMENSIONS = "1024";
+      process.env.EMBEDDING_CONTEXT_LENGTH = "8192";
+
+      const config = loadEmbeddingConfig();
+      expect(config.embeddingContextLength).toBe(8192);
+    });
+
+    it("auto-detects context length when alias matches a well-known model name", () => {
+      // LiteLLM aliases are usually named after the underlying model; the context-length
+      // table lookup uses the alias verbatim, so the operator gets free auto-detection
+      // when they keep names aligned.
+      process.env.EMBEDDING_PROVIDER = "litellm";
+      process.env.LITELLM_API_KEY = "sk-master-test";
+      process.env.EMBEDDING_MODEL = "text-embedding-3-small";
+      process.env.EMBEDDING_DIMENSIONS = "1536";
+
+      const config = loadEmbeddingConfig();
+      expect(config.embeddingContextLength).toBe(8191);
     });
   });
 });
