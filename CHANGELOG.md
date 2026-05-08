@@ -4,6 +4,16 @@ All notable changes to SocratiCode are documented here.
 This project uses [Conventional Commits](https://www.conventionalcommits.org/) and [Semantic Versioning](https://semver.org/).
 
 
+## [1.8.10](https://github.com/giancarloerra/socraticode/compare/v1.8.9...v1.8.10) (2026-05-08)
+
+### Features
+
+* **embeddings:** add LiteLLM as a first-class embedding provider ([1708510](https://github.com/giancarloerra/socraticode/commit/1708510c16707c3d03268e77ca0bd9ef8372f9ff)), closes [#42](https://github.com/giancarloerra/socraticode/issues/42)
+
+### Bug Fixes
+
+* **litellm:** iterate paginated /v1/models in readiness checks ([6c67965](https://github.com/giancarloerra/socraticode/commit/6c679656285420347a08a8b1adc52aea7123e76a))
+
 ## [1.8.9](https://github.com/giancarloerra/socraticode/compare/v1.8.8...v1.8.9) (2026-05-07)
 
 ### Bug Fixes
