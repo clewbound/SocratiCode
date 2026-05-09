@@ -100,7 +100,7 @@ interface ParsedName {
 export function parseCollectionName(name: string): ParsedName | null {
   // Matches: <prefix?><repoId>[__<branch>][_symgraph_(meta|file|index)]?
   const m =
-    /^(codebase_|codegraph_|context_)?([A-Za-z0-9_-]+?)(?:__([A-Za-z0-9_-]+))?(_symgraph_(?:meta|file|index))?$/.exec(
+    /^(codebase_|codegraph_|context_)?([A-Za-z0-9_-]+?)(?:__([A-Za-z0-9_-]+?))?(_symgraph_(?:meta|file|index))?$/.exec(
       name,
     );
   if (!m) return null;

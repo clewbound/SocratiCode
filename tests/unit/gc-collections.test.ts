@@ -47,4 +47,50 @@ describe("parseCollectionName", () => {
   it("returns null on empty input", () => {
     expect(parseCollectionName("")).toBeNull();
   });
+
+  // Symgraph collections are named <repoId>__<branch>_symgraph_<kind>. The branch
+  // capture group must not eat the trailing "_symgraph_*" suffix, otherwise the
+  // live-set lookup compares against "develop_symgraph_file" instead of "develop"
+  // and live collections are flagged dead.
+  it("parses <repoId>__<branch>_symgraph_<kind> with branch captured separately", () => {
+    expect(parseCollectionName("dd84eca85090__develop_symgraph_file")).toMatchObject({
+      prefix: "",
+      repoId: "dd84eca85090",
+      branch: "develop",
+      detached: false,
+    });
+  });
+
+  it("parses <repoId>__<branch>_symgraph_meta", () => {
+    expect(parseCollectionName("dd84eca85090__develop_symgraph_meta")).toMatchObject({
+      repoId: "dd84eca85090",
+      branch: "develop",
+    });
+  });
+
+  it("parses <repoId>__<branch>_symgraph_index", () => {
+    expect(parseCollectionName("dd84eca85090__develop_symgraph_index")).toMatchObject({
+      repoId: "dd84eca85090",
+      branch: "develop",
+    });
+  });
+
+  it("parses branch with underscores plus _symgraph_<kind>", () => {
+    expect(parseCollectionName("xx__feature_branch_symgraph_meta")?.branch).toBe(
+      "feature_branch",
+    );
+  });
+
+  it("still parses bare branch with underscores (no symgraph suffix)", () => {
+    expect(parseCollectionName("dd84eca85090__develop_branch")?.branch).toBe(
+      "develop_branch",
+    );
+  });
+
+  it("still parses detached HEAD branch suffix", () => {
+    expect(parseCollectionName("dd84eca85090__detached_abc12345")).toMatchObject({
+      branch: "detached_abc12345",
+      detached: true,
+    });
+  });
 });
