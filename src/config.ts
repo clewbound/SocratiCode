@@ -27,6 +27,69 @@ export function detectGitBranch(projectPath: string): string | null {
 }
 
 /**
+ * Fast HEAD-only branch detection.
+ *
+ * Reads `.git/HEAD` directly without spawning `git`. For hot paths where the
+ * cost of `execFileSync('git', ...)` is unacceptable (e.g. an admin endpoint
+ * that fans out across N watchlist entries under M concurrent requests).
+ *
+ * Returns `null` for: missing `.git`, malformed pointer files, detached HEAD
+ * (raw SHA), or symbolic refs that don't point at `refs/heads/*` (tag refs,
+ * remote-tracking refs, packed refs without a writable HEAD).
+ *
+ * Behavior parity vs `detectGitBranch`:
+ *   - branch HEAD: same value (e.g. `develop`, `dion/foo`)
+ *   - detached HEAD: both return `null`
+ *   - sym-ref to non-heads: this returns `null`; `detectGitBranch` would
+ *     return e.g. `v1.0.0` via `--abbrev-ref`. Rare in practice for daemon
+ *     workflows; callers needing full ref-resolution semantics should keep
+ *     using `detectGitBranch`.
+ */
+export function detectGitBranchFromHead(projectPath: string): string | null {
+  try {
+    const dotGit = path.join(path.resolve(projectPath), ".git");
+    let st: fs.Stats;
+    try {
+      st = fs.statSync(dotGit);
+    } catch {
+      return null;
+    }
+
+    let gitDir: string;
+    if (st.isDirectory()) {
+      gitDir = dotGit;
+    } else if (st.isFile()) {
+      let content: string;
+      try {
+        content = fs.readFileSync(dotGit, "utf-8");
+      } catch {
+        return null;
+      }
+      const m = /^gitdir:\s*(.+?)\s*$/m.exec(content);
+      if (!m) return null;
+      const raw = m[1];
+      gitDir = path.isAbsolute(raw)
+        ? raw
+        : path.resolve(path.resolve(projectPath), raw);
+    } else {
+      return null;
+    }
+
+    const headPath = path.join(gitDir, "HEAD");
+    let head: string;
+    try {
+      head = fs.readFileSync(headPath, "utf-8").trim();
+    } catch {
+      return null;
+    }
+    const refMatch = /^ref:\s*refs\/heads\/(.+)$/.exec(head);
+    return refMatch ? refMatch[1] : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Resolve the path to the git common-dir for `projectPath`.
  * For the main repo this is `<repo>/.git`; for a linked worktree this resolves
  * to the main repo's `.git/` directory. Returns null on non-git paths.
