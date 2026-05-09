@@ -2,7 +2,7 @@
 // Copyright (C) 2026 Giancarlo Erra - Altaire Limited
 
 import type http from "node:http";
-import { detectGitBranch } from "../config.js";
+import { detectGitBranchFromHead } from "../config.js";
 import { logger } from "../services/logger.js";
 import { isWatching } from "../services/watcher.js";
 import { runCollectionGc, runWatchlistGc } from "./gc.js";
@@ -41,7 +41,7 @@ export async function handleAdminRequest(
     if (url.pathname === "/admin/watchlist" && req.method === "GET") {
       const enriched = watchlist.entries().map((e) => ({
         ...e,
-        currentBranch: detectGitBranch(e.path),
+        currentBranch: detectGitBranchFromHead(e.path),
         isWatching: isWatching(e.path),
       }));
       return json(200, { entries: enriched });
