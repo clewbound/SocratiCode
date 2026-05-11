@@ -21,7 +21,7 @@ import { promisify } from "node:util";
 import { sanitizeBranchName } from "../config.js";
 import { logger } from "../services/logger.js";
 import { deleteCollection, getClient } from "../services/qdrant.js";
-import { clearMarkedDeadAt, getMarkedDeadAt, setMarkedDeadAt } from "./qdrant-meta.js";
+import { batchGetMarkedDeadAt, clearMarkedDeadAt, setMarkedDeadAt } from "./qdrant-meta.js";
 import { watchlist } from "./watchlist.js";
 
 const execFileP = promisify(execFile);
@@ -194,6 +194,11 @@ export async function runCollectionGc(opts: {
     collections: [] as Array<{ name: string }>,
   }));
 
+  // Single batched retrieve over every collection's metadata point — one RTT
+  // for the whole sweep instead of N. Missing or unreadable entries surface
+  // as null in the map, identical to the per-call behavior of getMarkedDeadAt.
+  const markedDeadByName = await batchGetMarkedDeadAt(collections.map((c) => c.name));
+
   for (const c of collections) {
     report.scanned += 1;
     const parsed = parseCollectionName(c.name);
@@ -202,7 +207,7 @@ export async function runCollectionGc(opts: {
     if (!liveSet) continue; // unknown repoId — leave alone (fail-open)
 
     const isLive = parsed.branch != null && liveSet.has(parsed.branch);
-    const markedAt = await getMarkedDeadAt(c.name).catch(() => null);
+    const markedAt = markedDeadByName.get(c.name) ?? null;
 
     if (isLive) {
       // Branch resurrection: clear any stale `markedDeadAt` so the next
