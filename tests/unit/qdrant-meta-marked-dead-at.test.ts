@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const setPayloadMock = vi.fn();
 const upsertMock = vi.fn();
+const deletePayloadMock = vi.fn();
 
 vi.mock("../../src/services/qdrant.js", () => ({
   METADATA_COLLECTION: "socraticode_metadata",
@@ -13,10 +14,13 @@ vi.mock("../../src/services/qdrant.js", () => ({
   getClient: () => ({
     setPayload: setPayloadMock,
     upsert: upsertMock,
+    deletePayload: deletePayloadMock,
   }),
 }));
 
-const { setMarkedDeadAt } = await import("../../src/daemon/qdrant-meta.js");
+const { setMarkedDeadAt, clearMarkedDeadAt } = await import(
+  "../../src/daemon/qdrant-meta.js"
+);
 
 describe("setMarkedDeadAt", () => {
   beforeEach(() => {
@@ -72,5 +76,45 @@ describe("setMarkedDeadAt", () => {
     setPayloadMock.mockRejectedValueOnce(new Error("ECONNREFUSED"));
     await expect(setMarkedDeadAt("x", 1)).rejects.toThrow("ECONNREFUSED");
     expect(upsertMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("clearMarkedDeadAt", () => {
+  beforeEach(() => {
+    deletePayloadMock.mockReset();
+  });
+
+  it("uses deletePayload in the happy path (point exists)", async () => {
+    deletePayloadMock.mockResolvedValueOnce(undefined);
+    await clearMarkedDeadAt("codebase_abc__develop");
+    expect(deletePayloadMock).toHaveBeenCalledTimes(1);
+    expect(deletePayloadMock).toHaveBeenCalledWith("socraticode_metadata", {
+      points: ["point-id-codebase_abc__develop"],
+      keys: ["markedDeadAt"],
+    });
+  });
+
+  // Symmetric to setMarkedDeadAt's upsert fallback: when the metadata point
+  // doesn't exist there is nothing to clear, so the call is a no-op rather
+  // than an error. Without this, a race between read and write — or any
+  // out-of-band point deletion — would surface as a spurious warning in the
+  // gc sweep log.
+  it("swallows 'Not found' silently (idempotent no-op)", async () => {
+    deletePayloadMock.mockRejectedValueOnce(
+      new Error("Not found: No point with id point-id-foo found"),
+    );
+    await expect(clearMarkedDeadAt("foo")).resolves.toBeUndefined();
+  });
+
+  it("matches the 'No point with id' shape returned by the HTTP API", async () => {
+    deletePayloadMock.mockRejectedValueOnce(
+      new Error('{"status":{"error":"Not found: No point with id X"}}'),
+    );
+    await expect(clearMarkedDeadAt("bar")).resolves.toBeUndefined();
+  });
+
+  it("re-throws other Qdrant errors (network, auth, etc.)", async () => {
+    deletePayloadMock.mockRejectedValueOnce(new Error("ECONNREFUSED"));
+    await expect(clearMarkedDeadAt("x")).rejects.toThrow("ECONNREFUSED");
   });
 });
