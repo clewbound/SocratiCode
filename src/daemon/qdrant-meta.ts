@@ -79,13 +79,24 @@ export async function setMarkedDeadAt(collName: string, ts: number): Promise<voi
  * branch is resurrected within the grace period so the next sweep doesn't
  * re-evaluate the collection as dead with stale timing.
  *
- * Throws on Qdrant errors; callers treat this as best-effort.
+ * When Qdrant reports the metadata point does not exist, treat as a no-op:
+ * there is no `markedDeadAt` to clear, so the desired post-state is already
+ * achieved. Symmetric to the upsert fallback in {@link setMarkedDeadAt} —
+ * keeps the call idempotent under races with point deletion and avoids
+ * spurious "best-effort failed" warnings in gc logs.
+ *
+ * Throws on other Qdrant errors so callers can surface real failures.
  */
 export async function clearMarkedDeadAt(collName: string): Promise<void> {
   await ensureMetadataCollection();
   const id = metadataPointId(collName);
-  await getClient().deletePayload(METADATA_COLLECTION, {
-    points: [id],
-    keys: ["markedDeadAt"],
-  });
+  try {
+    await getClient().deletePayload(METADATA_COLLECTION, {
+      points: [id],
+      keys: ["markedDeadAt"],
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (!/Not found|No point with id/i.test(msg)) throw err;
+  }
 }
