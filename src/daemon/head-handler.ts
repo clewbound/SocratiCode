@@ -27,6 +27,11 @@ export function defaultHeadChangeHandler(commonDir: string): (wt: string) => voi
       logger.debug("HEAD change for unknown worktree", { commonDir, worktreeName });
       return;
     }
+    // Touch BEFORE any deferral check: a HEAD flip is activity regardless of
+    // whether we end up reindexing. Skipping the touch on transient-op or
+    // detached-HEAD paths would let an actively-used worktree inactivity-evict
+    // just because reindex was deferred at the moment of the event.
+    watchlist.touch(entry.path);
     if (hasTransientGitOperation(commonDir)) {
       logger.info("git op in progress, deferring index", { path: entry.path });
       return;
