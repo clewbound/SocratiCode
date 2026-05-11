@@ -92,18 +92,55 @@ export function detectGitBranchFromHead(projectPath: string): string | null {
 /**
  * Resolve the path to the git common-dir for `projectPath`.
  * For the main repo this is `<repo>/.git`; for a linked worktree this resolves
- * to the main repo's `.git/` directory. Returns null on non-git paths.
+ * to the main repo's `.git/` directory. For a submodule (`.git` is a pointer
+ * file but no `commondir` exists) the gitdir is itself the common-dir.
+ * Returns null on non-git paths or malformed/dangling pointer files.
+ *
+ * File-read implementation; avoids a `git rev-parse --git-common-dir` spawn
+ * on the hot path of `resolveRepoId` (called once per MCP request via
+ * `projectIdFromPath`).
  */
 export function detectGitCommonDir(projectPath: string): string | null {
   try {
-    const out = execFileSync("git", ["rev-parse", "--git-common-dir"], {
-      cwd: path.resolve(projectPath),
-      encoding: "utf-8",
-      timeout: 5000,
-      stdio: ["pipe", "pipe", "pipe"],
-    }).trim();
-    if (!out) return null;
-    return path.resolve(path.resolve(projectPath), out);
+    const dotGit = path.join(path.resolve(projectPath), ".git");
+    let st: fs.Stats;
+    try {
+      st = fs.statSync(dotGit);
+    } catch {
+      return null;
+    }
+
+    // Main repo: `.git` is a directory and IS the common-dir.
+    if (st.isDirectory()) return dotGit;
+    if (!st.isFile()) return null;
+
+    // Linked worktree / submodule: `.git` is a pointer file with `gitdir: <path>`.
+    let pointer: string;
+    try {
+      pointer = fs.readFileSync(dotGit, "utf-8");
+    } catch {
+      return null;
+    }
+    const m = /^gitdir:\s*(.+?)\s*$/m.exec(pointer);
+    if (!m) return null;
+    const raw = m[1];
+    const gitDir = path.isAbsolute(raw)
+      ? raw
+      : path.resolve(path.resolve(projectPath), raw);
+    if (!fs.existsSync(gitDir)) return null;
+
+    // If a `commondir` file exists, the real common-dir is its (possibly
+    // relative) contents resolved against the worktree's gitdir. Otherwise
+    // the gitdir IS the common-dir (submodules, custom layouts).
+    const commondirPath = path.join(gitDir, "commondir");
+    let commonRaw: string;
+    try {
+      commonRaw = fs.readFileSync(commondirPath, "utf-8").trim();
+    } catch {
+      return gitDir;
+    }
+    if (!commonRaw) return gitDir;
+    return path.isAbsolute(commonRaw) ? commonRaw : path.resolve(gitDir, commonRaw);
   } catch {
     return null;
   }
