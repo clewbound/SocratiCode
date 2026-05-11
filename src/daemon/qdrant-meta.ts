@@ -42,18 +42,36 @@ export async function getMarkedDeadAt(collName: string): Promise<number | null> 
 
 /**
  * Stamp the metadata point with `markedDeadAt: <ts>`. Uses `setPayload` so
- * the existing payload (project metadata, hashes, etc.) is preserved.
+ * existing payload (project metadata, hashes, etc.) is preserved when the
+ * point already exists.
  *
- * Throws on Qdrant errors so the GC sweep can record the failure in its
- * report rather than silently moving on.
+ * When Qdrant reports the metadata point does not exist — which happens for
+ * symgraph subordinate collections and any legacy collection created before
+ * metadata-point side-effects were wired — fall back to `upsert` with a
+ * placeholder vector so the two-step GC protocol can still advance. Without
+ * this fallback `setPayload` throws and the GC sweep records a permanent
+ * failure for that collection, defeating the purpose of GC.
+ *
+ * Throws on other Qdrant errors so the GC sweep can record the failure in
+ * its report.
  */
 export async function setMarkedDeadAt(collName: string, ts: number): Promise<void> {
   await ensureMetadataCollection();
   const id = metadataPointId(collName);
-  await getClient().setPayload(METADATA_COLLECTION, {
-    points: [id],
-    payload: { markedDeadAt: ts },
-  });
+  const client = getClient();
+  try {
+    await client.setPayload(METADATA_COLLECTION, {
+      points: [id],
+      payload: { markedDeadAt: ts },
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    // Qdrant: "Not found: No point with id <uuid> found"
+    if (!/Not found|No point with id/i.test(msg)) throw err;
+    await client.upsert(METADATA_COLLECTION, {
+      points: [{ id, vector: [0], payload: { markedDeadAt: ts } }],
+    });
+  }
 }
 
 /**
