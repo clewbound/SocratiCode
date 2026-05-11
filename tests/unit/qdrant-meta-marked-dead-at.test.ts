@@ -6,6 +6,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const setPayloadMock = vi.fn();
 const upsertMock = vi.fn();
 const deletePayloadMock = vi.fn();
+const retrieveMock = vi.fn();
 
 vi.mock("../../src/services/qdrant.js", () => ({
   METADATA_COLLECTION: "socraticode_metadata",
@@ -15,10 +16,11 @@ vi.mock("../../src/services/qdrant.js", () => ({
     setPayload: setPayloadMock,
     upsert: upsertMock,
     deletePayload: deletePayloadMock,
+    retrieve: retrieveMock,
   }),
 }));
 
-const { setMarkedDeadAt, clearMarkedDeadAt } = await import(
+const { setMarkedDeadAt, clearMarkedDeadAt, batchGetMarkedDeadAt } = await import(
   "../../src/daemon/qdrant-meta.js"
 );
 
@@ -116,5 +118,65 @@ describe("clearMarkedDeadAt", () => {
   it("re-throws other Qdrant errors (network, auth, etc.)", async () => {
     deletePayloadMock.mockRejectedValueOnce(new Error("ECONNREFUSED"));
     await expect(clearMarkedDeadAt("x")).rejects.toThrow("ECONNREFUSED");
+  });
+});
+
+describe("batchGetMarkedDeadAt", () => {
+  beforeEach(() => {
+    retrieveMock.mockReset();
+  });
+
+  it("returns an empty map without hitting Qdrant when given no names", async () => {
+    const out = await batchGetMarkedDeadAt([]);
+    expect(out.size).toBe(0);
+    expect(retrieveMock).not.toHaveBeenCalled();
+  });
+
+  it("retrieves all metadata points in a single call and maps them by collection name", async () => {
+    retrieveMock.mockResolvedValueOnce([
+      { id: "point-id-a", payload: { markedDeadAt: 100 } },
+      { id: "point-id-b", payload: { markedDeadAt: 200 } },
+    ]);
+    const out = await batchGetMarkedDeadAt(["a", "b"]);
+    expect(retrieveMock).toHaveBeenCalledTimes(1);
+    expect(retrieveMock).toHaveBeenCalledWith("socraticode_metadata", {
+      ids: ["point-id-a", "point-id-b"],
+      with_payload: ["markedDeadAt"],
+    });
+    expect(out.get("a")).toBe(100);
+    expect(out.get("b")).toBe(200);
+  });
+
+  // Qdrant retrieve silently omits IDs that don't exist; the helper must
+  // backfill those keys as null so callers can treat the map as a complete
+  // lookup table over the requested set.
+  it("returns null for collections whose metadata point is missing", async () => {
+    retrieveMock.mockResolvedValueOnce([
+      { id: "point-id-present", payload: { markedDeadAt: 123 } },
+    ]);
+    const out = await batchGetMarkedDeadAt(["present", "missing-1", "missing-2"]);
+    expect(out.get("present")).toBe(123);
+    expect(out.get("missing-1")).toBeNull();
+    expect(out.get("missing-2")).toBeNull();
+  });
+
+  it("returns null when markedDeadAt is present but not a number", async () => {
+    retrieveMock.mockResolvedValueOnce([
+      { id: "point-id-a", payload: { markedDeadAt: "garbage" } },
+      { id: "point-id-b", payload: {} },
+    ]);
+    const out = await batchGetMarkedDeadAt(["a", "b"]);
+    expect(out.get("a")).toBeNull();
+    expect(out.get("b")).toBeNull();
+  });
+
+  // Fail-open: a transient Qdrant failure must not crash the gc sweep. The
+  // sweep treats null as "not yet marked", so the worst-case outcome is one
+  // extra mark-dead pass next cycle — never a deletion.
+  it("returns all-null on retrieve failure (fail-open for the gc sweep)", async () => {
+    retrieveMock.mockRejectedValueOnce(new Error("ECONNREFUSED"));
+    const out = await batchGetMarkedDeadAt(["a", "b"]);
+    expect(out.get("a")).toBeNull();
+    expect(out.get("b")).toBeNull();
   });
 });
