@@ -41,6 +41,46 @@ export async function getMarkedDeadAt(collName: string): Promise<number | null> 
 }
 
 /**
+ * Read `markedDeadAt` for many collections in a single Qdrant `retrieve`
+ * call. Returns a Map with one entry per requested name — `null` when the
+ * metadata point is missing, the `markedDeadAt` key is absent, or the
+ * payload value isn't a number. On retrieve failure the whole map is
+ * filled with `null` so the gc sweep degrades to "no collections marked"
+ * rather than crashing.
+ *
+ * Replaces a per-collection sequential loop. For ~34 collections this
+ * collapses the wall time of the read step from ~600ms (one RTT each) to
+ * a single RTT.
+ */
+export async function batchGetMarkedDeadAt(
+  collNames: readonly string[],
+): Promise<Map<string, number | null>> {
+  const out = new Map<string, number | null>();
+  if (collNames.length === 0) return out;
+  await ensureMetadataCollection();
+  const nameById = new Map<string, string>();
+  for (const name of collNames) {
+    nameById.set(metadataPointId(name), name);
+    out.set(name, null);
+  }
+  try {
+    const points = await getClient().retrieve(METADATA_COLLECTION, {
+      ids: [...nameById.keys()],
+      with_payload: ["markedDeadAt"],
+    });
+    for (const p of points) {
+      const name = nameById.get(String(p.id));
+      if (!name) continue;
+      const v = p.payload?.markedDeadAt;
+      if (typeof v === "number") out.set(name, v);
+    }
+  } catch {
+    // out is already populated with null for every requested name
+  }
+  return out;
+}
+
+/**
  * Stamp the metadata point with `markedDeadAt: <ts>`. Uses `setPayload` so
  * existing payload (project metadata, hashes, etc.) is preserved when the
  * point already exists.
