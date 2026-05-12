@@ -379,6 +379,106 @@ describe("watcher (unit)", () => {
     });
   });
 
+  // ── onActivity callback (phase 11) ───────────────────────────────────────
+  // Fires once per debounce-burst so the watchlist can refresh `lastQueriedAt`
+  // without paying a persist cost per file event.
+
+  describe("onActivity callback", () => {
+    it("fires once after a debounce burst of multiple events", async () => {
+      vi.useFakeTimers();
+      vi.mocked(shouldIgnore).mockReturnValue(false);
+      const onActivity = vi.fn();
+
+      await startWatching(TEST_PROJECT, undefined, onActivity);
+
+      for (let i = 0; i < 5; i++) {
+        mockSubscribeCallback?.(null, [
+          { path: path.join(RESOLVED_PROJECT, `f${i}.ts`), type: "update" },
+        ]);
+      }
+      await vi.advanceTimersByTimeAsync(2100);
+
+      expect(onActivity).toHaveBeenCalledTimes(1);
+      vi.useRealTimers();
+    });
+
+    it("fires once per burst across two distinct quiet periods", async () => {
+      vi.useFakeTimers();
+      vi.mocked(shouldIgnore).mockReturnValue(false);
+      const onActivity = vi.fn();
+
+      await startWatching(TEST_PROJECT, undefined, onActivity);
+
+      mockSubscribeCallback?.(null, [
+        { path: path.join(RESOLVED_PROJECT, "a.ts"), type: "update" },
+      ]);
+      await vi.advanceTimersByTimeAsync(2100);
+      mockSubscribeCallback?.(null, [
+        { path: path.join(RESOLVED_PROJECT, "b.ts"), type: "update" },
+      ]);
+      await vi.advanceTimersByTimeAsync(2100);
+
+      expect(onActivity).toHaveBeenCalledTimes(2);
+      vi.useRealTimers();
+    });
+
+    // Activity is an independent signal from the reindex result. If reindex
+    // throws we still want the watchlist touch — otherwise a broken Qdrant
+    // would cause active worktrees to inactivity-evict.
+    it("still fires when updateProjectIndex throws", async () => {
+      vi.useFakeTimers();
+      vi.mocked(shouldIgnore).mockReturnValue(false);
+      mockUpdateProjectIndex.mockRejectedValueOnce(new Error("qdrant down"));
+      const onActivity = vi.fn();
+
+      await startWatching(TEST_PROJECT, undefined, onActivity);
+
+      mockSubscribeCallback?.(null, [
+        { path: path.join(RESOLVED_PROJECT, "a.ts"), type: "update" },
+      ]);
+      await vi.advanceTimersByTimeAsync(2100);
+
+      expect(onActivity).toHaveBeenCalledTimes(1);
+      vi.useRealTimers();
+    });
+
+    // Callback is best-effort: a throwing onActivity must not break the
+    // reindex pipeline.
+    it("survives an onActivity that throws", async () => {
+      vi.useFakeTimers();
+      vi.mocked(shouldIgnore).mockReturnValue(false);
+      const onActivity = vi.fn(() => {
+        throw new Error("touch failed");
+      });
+
+      await startWatching(TEST_PROJECT, undefined, onActivity);
+
+      mockSubscribeCallback?.(null, [
+        { path: path.join(RESOLVED_PROJECT, "a.ts"), type: "update" },
+      ]);
+      await vi.advanceTimersByTimeAsync(2100);
+
+      expect(onActivity).toHaveBeenCalledTimes(1);
+      expect(mockUpdateProjectIndex).toHaveBeenCalledTimes(1);
+      vi.useRealTimers();
+    });
+
+    it("is optional — startWatching still works without it", async () => {
+      vi.useFakeTimers();
+      vi.mocked(shouldIgnore).mockReturnValue(false);
+
+      await startWatching(TEST_PROJECT);
+
+      mockSubscribeCallback?.(null, [
+        { path: path.join(RESOLVED_PROJECT, "a.ts"), type: "update" },
+      ]);
+      await vi.advanceTimersByTimeAsync(2100);
+
+      expect(mockUpdateProjectIndex).toHaveBeenCalledTimes(1);
+      vi.useRealTimers();
+    });
+  });
+
   // ── Error handling ─────────────────────────────────────────────────────
 
   describe("error handling", () => {
