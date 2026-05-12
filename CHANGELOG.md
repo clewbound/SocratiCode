@@ -4,6 +4,14 @@ All notable changes to SocratiCode are documented here.
 This project uses [Conventional Commits](https://www.conventionalcommits.org/) and [Semantic Versioning](https://semver.org/).
 
 
+## [1.8.11](https://github.com/giancarloerra/socraticode/compare/v1.8.10...v1.8.11) (2026-05-12)
+
+### Bug Fixes
+
+* **index:** flush stderr before exit on Node 26+ guard ([5cd9db0](https://github.com/giancarloerra/socraticode/commit/5cd9db07e6c993c8f2fafa756415153afb26da05))
+* **index:** use fs.writeSync for synchronous flush + sync exit ([69a6b74](https://github.com/giancarloerra/socraticode/commit/69a6b74b8aff6297fd297fb8f995682e72de1053))
+* refuse to start on Node 26+ until qdrant-js gains undici 7 compat ([c23120e](https://github.com/giancarloerra/socraticode/commit/c23120e6c097a6036c17d7ecdf10a40061f3da36)), closes [qdrant/qdrant-js#123](https://github.com/qdrant/qdrant-js/issues/123) [qdrant/qdrant-js#128](https://github.com/qdrant/qdrant-js/issues/128) [qdrant/qdrant-js#134](https://github.com/qdrant/qdrant-js/issues/134)
+
 ## [1.8.10](https://github.com/giancarloerra/socraticode/compare/v1.8.9...v1.8.10) (2026-05-08)
 
 ### Features
