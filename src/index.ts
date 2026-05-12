@@ -16,13 +16,17 @@
 // upper bound in package.json's `engines.node` and remove this check.
 const nodeMajor = Number.parseInt(process.versions.node.split(".")[0], 10);
 if (Number.isFinite(nodeMajor) && nodeMajor >= 26) {
-  process.stderr.write(
+  // Write-then-exit-in-callback: stderr writes are async when piped (every MCP host
+  // captures stderr), and a bare `process.exit(1)` terminates the process synchronously
+  // without draining I/O, risking truncation of this message.
+  const msg =
     `socraticode: Node ${process.versions.node} is not supported.\n` +
-      "  @qdrant/js-client-rest is incompatible with the undici bundled in Node 26+.\n" +
-      "  Use Node 22.x (via nvm: `nvm install 22 && nvm use 22`, or `brew install node@22` on macOS).\n" +
-      "  See https://github.com/qdrant/qdrant-js/issues/134.\n",
-  );
-  process.exit(1);
+    "  @qdrant/js-client-rest is incompatible with the undici bundled in Node 26+.\n" +
+    "  Use Node 22.x (via nvm: `nvm install 22 && nvm use 22`, or `brew install node@22` on macOS).\n" +
+    "  See https://github.com/qdrant/qdrant-js/issues/134.\n";
+  process.stderr.write(msg, () => {
+    process.exit(1);
+  });
 }
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
