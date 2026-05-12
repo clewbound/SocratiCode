@@ -11,24 +11,25 @@
 // but qdrant-js's module-init is side-effect-light — only an actual request triggers
 // the undici path — so exiting here is enough to spare users the opaque error later.)
 // Tracked upstream: https://github.com/qdrant/qdrant-js/issues/134
-// Candidate fixes already in flight: qdrant/qdrant-js#123 (undici major upgrade) and
-// qdrant/qdrant-js#128 (inject fetch into REST transport). Once one lands, raise the
-// upper bound in package.json's `engines.node` and remove this check.
+// Upstream PRs under discussion: qdrant/qdrant-js#123 (undici major upgrade) and
+// qdrant/qdrant-js#128 (inject fetch into REST transport). If either lands — or any
+// other fix supersedes them — raise the upper bound in package.json's `engines.node`
+// and remove this check.
 const nodeMajor = Number.parseInt(process.versions.node.split(".")[0], 10);
 if (Number.isFinite(nodeMajor) && nodeMajor >= 26) {
-  // Write-then-exit-in-callback: stderr writes are async when piped (every MCP host
-  // captures stderr), and a bare `process.exit(1)` terminates the process synchronously
-  // without draining I/O, risking truncation of this message.
+  // fs.writeSync(2, …) is the canonical Node idiom for "print fatal error then die":
+  // blocking (no truncation when stderr is piped — every MCP host pipes stderr) and
+  // synchronous (so process.exit(1) runs before any further top-level code).
   const msg =
     `socraticode: Node ${process.versions.node} is not supported.\n` +
     "  @qdrant/js-client-rest is incompatible with the undici bundled in Node 26+.\n" +
     "  Use Node 22.x (via nvm: `nvm install 22 && nvm use 22`, or `brew install node@22` on macOS).\n" +
     "  See https://github.com/qdrant/qdrant-js/issues/134.\n";
-  process.stderr.write(msg, () => {
-    process.exit(1);
-  });
+  writeSync(2, msg);
+  process.exit(1);
 }
 
+import { writeSync } from "node:fs";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
