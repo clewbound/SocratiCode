@@ -7,7 +7,7 @@
  * lazy-loaded per-file payloads.
  */
 
-import { MAX_FLOW_DEPTH, MAX_IMPACT_DEPTH } from "../constants.js";
+import { MAX_FLOW_DEPTH, MAX_IMPACT_DEPTH, toForwardSlash } from "../constants.js";
 import type { SymbolNode } from "../types.js";
 import {
   type SymbolGraphCache,
@@ -184,7 +184,10 @@ export async function getSymbolContext(
 ): Promise<SymbolContext[]> {
   const nameIndex = await cache.getNameIndex();
   let refs = nameIndex.get(name) ?? [];
-  if (fileHint) refs = refs.filter((r) => r.file === fileHint);
+  if (fileHint) {
+    const normalizedHint = toForwardSlash(fileHint);
+    refs = refs.filter((r) => r.file === normalizedHint);
+  }
   if (refs.length === 0) return [];
 
   const reverseIndex = await cache.getReverseFileIndex();
@@ -237,7 +240,7 @@ export async function listSymbols(
   const out: SymbolNode[] = [];
 
   if (opts.file) {
-    const payload = await cache.getFilePayload(opts.file);
+    const payload = await cache.getFilePayload(toForwardSlash(opts.file));
     if (!payload) return [];
     for (const s of payload.symbols) {
       if (s.name === "<module>") continue;

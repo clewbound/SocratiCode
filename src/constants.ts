@@ -165,6 +165,18 @@ export const ENTRY_POINT_NAMES: Record<string, Set<string>> = {
   php: new Set(["main"]),
 };
 
+// ── Path normalization ──────────────────────────────────────────────────
+
+/**
+ * Normalize path separators to forward slashes.
+ * On POSIX this is a no-op; on Windows it replaces every `\` with `/`.
+ * Used for graph node keys, fileSet entries, and query inputs so that
+ * lookups succeed regardless of the host OS separator convention.
+ */
+export function toForwardSlash(p: string): string {
+  return p.replace(/\\/g, "/");
+}
+
 // ── File type configuration ─────────────────────────────────────────────
 
 export const SUPPORTED_EXTENSIONS = new Set([

@@ -113,6 +113,38 @@ describe("graph-analysis", () => {
       expect(deps.imports).toHaveLength(0);
       expect(deps.importedBy).toHaveLength(0);
     });
+
+    it("normalizes Windows backslash paths to match forward-slash graph keys", () => {
+      const graph = createSampleGraph();
+      // Graph keys use forward slashes; simulate a Windows-style query
+      const deps = getFileDependencies(graph, "src\\index.ts");
+
+      expect(deps.imports).toContain("src/utils.ts");
+      expect(deps.imports).toContain("src/types.ts");
+    });
+
+    it("normalizes deeply nested Windows paths", () => {
+      const nodes: CodeGraphNode[] = [
+        makeNode("src/services/graph/analysis.ts", ["src/types.ts"], []),
+        makeNode("src/types.ts", [], ["src/services/graph/analysis.ts"]),
+      ];
+      const edges: CodeGraphEdge[] = [
+        makeEdge("src/services/graph/analysis.ts", "src/types.ts"),
+      ];
+      const graph = makeGraph(nodes, edges);
+
+      const deps = getFileDependencies(graph, "src\\services\\graph\\analysis.ts");
+      expect(deps.imports).toContain("src/types.ts");
+    });
+
+    it("handles mixed separator paths", () => {
+      const graph = createSampleGraph();
+      const deps = getFileDependencies(graph, "src/utils.ts");
+      const depsMixed = getFileDependencies(graph, "src\\utils.ts");
+
+      expect(depsMixed.imports).toEqual(deps.imports);
+      expect(depsMixed.importedBy).toEqual(deps.importedBy);
+    });
   });
 
   describe("findCircularDependencies", () => {

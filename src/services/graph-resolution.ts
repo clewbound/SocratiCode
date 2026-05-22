@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Giancarlo Erra - Altaire Limited
 import { readFileSync } from "node:fs";
 import path from "node:path";
+import { toForwardSlash } from "../constants.js";
 import type { PathAliases } from "./graph-aliases.js";
 
 // ── Module resolution ────────────────────────────────────────────────────
@@ -12,7 +13,7 @@ import type { PathAliases } from "./graph-aliases.js";
  * For a Maven/Gradle multi-module layout such as:
  *   module-a/sub-module/src/main/java/com/example/Foo.java
  * the map entry is:
- *   key:   "com/example/Foo.java"  (platform-normalised with path.sep)
+ *   key:   "com/example/Foo.java"  (forward-slash-normalized)
  *   value: "module-a/sub-module/src/main/java/com/example/Foo.java"
  *
  * This enables O(1) resolution of fully-qualified class names that cannot be
@@ -41,7 +42,7 @@ export function buildJvmSuffixMap(fileSet: Set<string>): Map<string, string> {
 
     if (idx !== -1) {
       // classPath = everything after src/main/<lang>, e.g. com/example/Foo.java
-      const classPath = parts.slice(idx + 3).join(path.sep);
+      const classPath = parts.slice(idx + 3).join("/");
       // Only register the first match to avoid ambiguity for duplicate class names.
       if (!map.has(classPath)) {
         map.set(classPath, f);
@@ -184,13 +185,9 @@ export function buildGoModuleInfo(
 
   const packageMap = new Map<string, string>();
   for (const f of goFiles) {
-    // Normalize the directory key to forward slashes. Go import paths
-    // always use forward slashes regardless of host OS, so the key must
-    // be in the same form for the lookup in resolveImport to succeed on
-    // Windows (where path.dirname produces backslash separators for
-    // nested directories like `pkg\subpkg`). The map value keeps the
-    // file's native-separator form so it matches fileSet entries used
-    // elsewhere as graph node keys.
+    // Go import paths always use forward slashes. fileSet entries are
+    // also forward-slash-normalized (see toForwardSlash in constants.ts),
+    // so the key and value are both in the same form.
     const dir = path.dirname(f).replace(/\\/g, "/"); // "." for files at the project root
     if (!packageMap.has(dir)) {
       packageMap.set(dir, f);
@@ -351,7 +348,7 @@ export function resolveImport(
       //    The map is built once per graph build (O(n)) and looked up in O(1).
       if (jvmSuffixMap) {
         for (const ext of exts) {
-          const classPath = filePath.replace(/\//g, path.sep) + ext;
+          const classPath = filePath + ext;
           const found = jvmSuffixMap.get(classPath);
           if (found) return found;
         }
@@ -419,7 +416,7 @@ export function resolveImport(
           path.join(sourceDir, moduleSpecifier, "mod.rs"),
         ];
         for (const candidate of candidates) {
-          const rel = path.relative(projectPath, candidate);
+          const rel = toForwardSlash(path.relative(projectPath, candidate));
           if (fileSet.has(rel)) return rel;
         }
       }
@@ -564,7 +561,7 @@ function resolveRelativePath(
   extensions: string[],
 ): string | null {
   const fullPath = path.resolve(baseDir, modulePath);
-  const relPath = path.relative(projectPath, fullPath);
+  const relPath = toForwardSlash(path.relative(projectPath, fullPath));
 
   // Direct match
   if (fileSet.has(relPath)) return relPath;
@@ -590,7 +587,7 @@ function resolveRelativePath(
 
   // Try as directory with index file
   for (const ext of extensions) {
-    const indexFile = path.join(relPath, `index${ext}`);
+    const indexFile = toForwardSlash(path.join(relPath, `index${ext}`));
     if (fileSet.has(indexFile)) return indexFile;
   }
 
@@ -600,11 +597,11 @@ function resolveRelativePath(
     const base = path.basename(relPath);
     if (!base.startsWith("_")) {
       // Try _name (direct)
-      const partial = path.join(dir, `_${base}`);
+      const partial = toForwardSlash(path.join(dir, `_${base}`));
       if (fileSet.has(partial)) return partial;
       // Try _name with extensions
       for (const ext of extensions) {
-        const partialExt = path.join(dir, `_${base}${ext}`);
+        const partialExt = toForwardSlash(path.join(dir, `_${base}${ext}`));
         if (fileSet.has(partialExt)) return partialExt;
       }
     }
@@ -612,7 +609,7 @@ function resolveRelativePath(
 
   // Python: try __init__.py
   if (extensions.includes(".py")) {
-    const initFile = path.join(relPath, "__init__.py");
+    const initFile = toForwardSlash(path.join(relPath, "__init__.py"));
     if (fileSet.has(initFile)) return initFile;
   }
 
