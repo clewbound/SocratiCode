@@ -14,7 +14,7 @@ export function getFileDependencies(graph: CodeGraph, relativePath: string): {
   importedBy: string[];
 } {
   const normalized = toForwardSlash(relativePath);
-  const node = graph.nodes.find((n) => n.relativePath === normalized);
+  const node = graph.nodes.find((n) => toForwardSlash(n.relativePath) === normalized);
   if (!node) {
     return { imports: [], importedBy: [] };
   }

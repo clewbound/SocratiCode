@@ -145,6 +145,26 @@ describe("graph-analysis", () => {
       expect(depsMixed.imports).toEqual(deps.imports);
       expect(depsMixed.importedBy).toEqual(deps.importedBy);
     });
+
+    it("finds nodes in a legacy cached graph with backslash keys", () => {
+      // Simulate a graph built on Windows before the fix: stored keys have backslashes
+      const nodes: CodeGraphNode[] = [
+        makeNode("src\\services\\api.ts", ["src\\types.ts"], []),
+        makeNode("src\\types.ts", [], ["src\\services\\api.ts"]),
+      ];
+      // Fix relativePath (makeNode sets it from the argument)
+      nodes[0].relativePath = "src\\services\\api.ts";
+      nodes[1].relativePath = "src\\types.ts";
+
+      const edges: CodeGraphEdge[] = [
+        makeEdge("src\\services\\api.ts", "src\\types.ts"),
+      ];
+      const graph = makeGraph(nodes, edges);
+
+      // Query with forward slashes should still find the node
+      const deps = getFileDependencies(graph, "src/services/api.ts");
+      expect(deps.imports).toContain("src\\types.ts");
+    });
   });
 
   describe("findCircularDependencies", () => {
