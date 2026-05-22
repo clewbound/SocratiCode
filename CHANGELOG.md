@@ -4,6 +4,13 @@ All notable changes to SocratiCode are documented here.
 This project uses [Conventional Commits](https://www.conventionalcommits.org/) and [Semantic Versioning](https://semver.org/).
 
 
+## [1.8.12](https://github.com/giancarloerra/socraticode/compare/v1.8.11...v1.8.12) (2026-05-22)
+
+### Bug Fixes
+
+* **graph:** normalize stored node keys during lookup for legacy cache compat ([4526ea5](https://github.com/giancarloerra/socraticode/commit/4526ea58ae332b3839019eb3f46a0eff08801bd6))
+* **graph:** normalize Windows backslash paths to forward slashes ([e9ee3ea](https://github.com/giancarloerra/socraticode/commit/e9ee3ea116639fc20e19952d9f8871dafdf87599)), closes [#60](https://github.com/giancarloerra/socraticode/issues/60)
+
 ## [1.8.11](https://github.com/giancarloerra/socraticode/compare/v1.8.10...v1.8.11) (2026-05-12)
 
 ### Bug Fixes
