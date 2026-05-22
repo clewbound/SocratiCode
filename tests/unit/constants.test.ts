@@ -27,6 +27,7 @@ import {
   SEARCH_MIN_SCORE,
   SPECIAL_FILES,
   SUPPORTED_EXTENSIONS,
+  toForwardSlash,
 } from "../../src/constants.js";
 
 describe("constants", () => {
@@ -370,6 +371,37 @@ describe("constants", () => {
       const result = mergeExtraExtensions(undefined);
       expect(result.size).toBe(0);
     });
+  });
+});
+
+describe("toForwardSlash", () => {
+  it("returns the same string when no backslashes are present", () => {
+    expect(toForwardSlash("src/index.ts")).toBe("src/index.ts");
+  });
+
+  it("replaces single backslash with forward slash", () => {
+    expect(toForwardSlash("src\\index.ts")).toBe("src/index.ts");
+  });
+
+  it("replaces multiple backslashes in a path", () => {
+    expect(toForwardSlash("src\\services\\graph-analysis.ts")).toBe("src/services/graph-analysis.ts");
+  });
+
+  it("handles deeply nested Windows paths", () => {
+    expect(toForwardSlash("src\\a\\b\\c\\d\\file.ts")).toBe("src/a/b/c/d/file.ts");
+  });
+
+  it("handles empty string", () => {
+    expect(toForwardSlash("")).toBe("");
+  });
+
+  it("handles path with mixed separators", () => {
+    expect(toForwardSlash("src/services\\graph-analysis.ts")).toBe("src/services/graph-analysis.ts");
+  });
+
+  it("is a no-op on POSIX-style paths", () => {
+    const posixPath = "src/services/code-graph.ts";
+    expect(toForwardSlash(posixPath)).toBe(posixPath);
   });
 });
 

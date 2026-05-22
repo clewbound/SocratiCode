@@ -1,17 +1,20 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 Giancarlo Erra - Altaire Limited
 import path from "node:path";
-import { getLanguageFromExtension } from "../constants.js";
+import { getLanguageFromExtension, toForwardSlash } from "../constants.js";
 import type { CodeGraph } from "../types.js";
 
 /**
  * Get dependencies for a specific file.
+ * The input path is normalized to forward slashes so lookups succeed
+ * regardless of whether the caller passes `/` or `\` separators.
  */
 export function getFileDependencies(graph: CodeGraph, relativePath: string): {
   imports: string[];
   importedBy: string[];
 } {
-  const node = graph.nodes.find((n) => n.relativePath === relativePath);
+  const normalized = toForwardSlash(relativePath);
+  const node = graph.nodes.find((n) => toForwardSlash(n.relativePath) === normalized);
   if (!node) {
     return { imports: [], importedBy: [] };
   }

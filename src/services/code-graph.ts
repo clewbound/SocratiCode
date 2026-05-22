@@ -6,7 +6,7 @@ import { createRequire } from "node:module";
 import path from "node:path";
 import { Lang, registerDynamicLanguage } from "@ast-grep/napi";
 import { graphCollectionName, projectIdFromPath } from "../config.js";
-import { EXTRA_EXTENSIONS, getLanguageFromExtension, MAX_GRAPH_FILE_BYTES } from "../constants.js";
+import { EXTRA_EXTENSIONS, getLanguageFromExtension, MAX_GRAPH_FILE_BYTES, toForwardSlash } from "../constants.js";
 import type {
   CodeGraph, CodeGraphEdge, CodeGraphNode,
   SymbolEdge, SymbolGraphFilePayload, SymbolGraphMeta, SymbolNode, SymbolRef,
@@ -596,7 +596,7 @@ async function getGraphableFiles(
 
     for (const entry of entries) {
       const fullPath = path.join(dir, entry.name);
-      const relPath = path.relative(projectPath, fullPath);
+      const relPath = toForwardSlash(path.relative(projectPath, fullPath));
 
       if (shouldIgnore(ig, relPath)) continue;
 
