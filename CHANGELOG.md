@@ -4,6 +4,12 @@ All notable changes to SocratiCode are documented here.
 This project uses [Conventional Commits](https://www.conventionalcommits.org/) and [Semantic Versioning](https://semver.org/).
 
 
+## [1.8.13](https://github.com/giancarloerra/socraticode/compare/v1.8.12...v1.8.13) (2026-05-27)
+
+### Documentation
+
+* update expired Discord invite link ([71e1e0b](https://github.com/giancarloerra/socraticode/commit/71e1e0bc039119da9939ace272916814f1c222cf))
+
 ## [1.8.12](https://github.com/giancarloerra/socraticode/compare/v1.8.11...v1.8.12) (2026-05-22)
 
 ### Bug Fixes
