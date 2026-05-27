@@ -10,7 +10,7 @@
   <a href="https://www.npmjs.com/package/socraticode"><img src="https://img.shields.io/npm/v/socraticode.svg" alt="npm version"></a>
   <a href="https://nodejs.org/"><img src="https://img.shields.io/badge/node-%3E%3D18-brightgreen.svg" alt="Node.js >= 18"></a>
   <a href="https://github.com/giancarloerra/socraticode"><img src="https://img.shields.io/github/stars/giancarloerra/socraticode?style=social" alt="GitHub stars"></a>
-  <a href="https://discord.gg/5DrMXfNG"><img src="https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white" alt="Discord"></a>
+  <a href="https://discord.gg/dHNMKVY2J2"><img src="https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white" alt="Discord"></a>
 </p>
 
 <p align="center">
@@ -36,7 +36,7 @@
 
 > If SocratiCode has been useful to you, please ⭐ **star this repo** — it helps others discover it — and share it with your dev team and fellow developers!
 >
-> 💬 Questions or just want to chat? Join us on [Discord](https://discord.gg/5DrMXfNG).
+> 💬 Questions or just want to chat? Join us on [Discord](https://discord.gg/dHNMKVY2J2).
 
 > **☁️ SocratiCode Cloud (private beta)** — Hosted, shared team index built on the same engine as the open-source version, plus SSO, audit logs, branch-aware indexing, and VPC / air-gapped deployment options. The open-source core remains free forever. [Request early access →](https://socraticode.cloud)
 
@@ -1424,7 +1424,7 @@ The code you see behind Socrates is part of the original Apollo 11 guidance comp
 
 ## Community
 
-- 💬 **[Discord](https://discord.gg/5DrMXfNG)** — chat with users and maintainers, ask "how do I…", share what you're building
+- 💬 **[Discord](https://discord.gg/dHNMKVY2J2)** — chat with users and maintainers, ask "how do I…", share what you're building
 - 🐛 **[GitHub Issues](https://github.com/giancarloerra/socraticode/issues)** — bug reports and confirmed feature requests (please use the templates)
 - 📣 **Releases** — *Watch* the repo (top-right on GitHub → *Custom* → *Releases*) to be notified of new versions
 

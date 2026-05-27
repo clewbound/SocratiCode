@@ -13,7 +13,7 @@ Same understanding of your code, every assistant, every tool switch.</p>
   <a href="https://open-vsx.org/extension/giancarloerra/socraticode"><img src="https://img.shields.io/open-vsx/v/giancarloerra/socraticode?style=flat-square&label=Open%20VSX" alt="Open VSX"></a>
   <a href="https://open-vsx.org/extension/giancarloerra/socraticode"><img src="https://img.shields.io/open-vsx/dt/giancarloerra/socraticode?style=flat-square&label=downloads" alt="Open VSX Downloads"></a>
   <a href="https://github.com/giancarloerra/socraticode"><img src="https://img.shields.io/github/stars/giancarloerra/socraticode?style=flat-square&logo=github&label=stars" alt="GitHub stars"></a>
-  <a href="https://discord.gg/5DrMXfNG"><img src="https://img.shields.io/badge/Discord-Join-5865F2?style=flat-square&logo=discord&logoColor=white" alt="Discord"></a>
+  <a href="https://discord.gg/dHNMKVY2J2"><img src="https://img.shields.io/badge/Discord-Join-5865F2?style=flat-square&logo=discord&logoColor=white" alt="Discord"></a>
   <a href="https://www.npmjs.com/package/socraticode"><img src="https://img.shields.io/npm/v/socraticode?style=flat-square&logo=npm&label=engine" alt="npm engine"></a>
   <a href="https://github.com/giancarloerra/socraticode/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue?style=flat-square" alt="License"></a>
 </p>
@@ -170,7 +170,7 @@ project repo:
 
 - **[Full README, configuration reference, and benchmark methodology](https://github.com/giancarloerra/socraticode#readme)**
 - [Issues and feature requests](https://github.com/giancarloerra/socraticode/issues)
-- [Discord community](https://discord.gg/5DrMXfNG)
+- [Discord community](https://discord.gg/dHNMKVY2J2)
 
 ## Troubleshooting
 

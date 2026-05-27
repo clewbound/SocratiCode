@@ -9,7 +9,7 @@
 
 ### Community
 
-- **[Discord](https://discord.gg/5DrMXfNG)** — Real-time chat: ask "how do I…", get setup help, share what you're building
+- **[Discord](https://discord.gg/dHNMKVY2J2)** — Real-time chat: ask "how do I…", get setup help, share what you're building
 - **[GitHub Issues](https://github.com/giancarloerra/socraticode/issues)** — Report bugs or request features (use the templates provided)
 
 ### Troubleshooting
