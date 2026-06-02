@@ -492,6 +492,7 @@ export function ensureDynamicLanguages(): void {
       ["scala",   "@ast-grep/lang-scala"],
       ["bash",    "@ast-grep/lang-bash"],
       ["php",     "@ast-grep/lang-php"],
+      ["lua",     "@ast-grep/lang-lua"],
     ];
 
     for (const [name, pkg] of langPackages) {
@@ -598,7 +599,7 @@ async function getGraphableFiles(
       const fullPath = path.join(dir, entry.name);
       const relPath = toForwardSlash(path.relative(projectPath, fullPath));
 
-      if (shouldIgnore(ig, relPath)) continue;
+      if (shouldIgnore(ig, entry.isDirectory() ? `${relPath}/` : relPath)) continue;
 
       if (entry.isDirectory()) {
         await walk(fullPath);
