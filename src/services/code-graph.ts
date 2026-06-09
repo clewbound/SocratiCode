@@ -579,7 +579,7 @@ export function getAstGrepLang(ext: string): Lang | string | null {
  * Get all source files in a project for graph analysis.
  * Includes files with known AST grammars and any extra extensions.
  */
-async function getGraphableFiles(
+export async function getGraphableFiles(
   projectPath: string,
   extraExts?: Set<string>,
 ): Promise<string[]> {

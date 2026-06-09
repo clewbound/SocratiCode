@@ -178,7 +178,7 @@ function extractFromLua(
   language: string,
   moduleSym: SymbolNode,
 ): ExtractedSymbols {
-  const root = parse("lua", source).root();
+  const root = parse("lua" as unknown as Lang, source).root();
   const symbols: SymbolNode[] = [moduleSym];
   const scopes: ScopeFrame[] = [];
   const NAME = new Set(["dot_index_expression", "method_index_expression", "identifier"]);
