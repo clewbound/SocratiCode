@@ -370,7 +370,109 @@ main() {
     });
   });
 
-  describe("Regex fallback (Dart, Lua, Svelte, Vue, unknown)", () => {
+  describe("Lua", () => {
+    it("extracts namespace-table, method, local, and assignment function forms", () => {
+      const src = `
+local T = {}
+
+function T.method(a)
+  return a
+end
+
+function T:m()
+  return self
+end
+
+local function helper()
+  return 1
+end
+
+T.f = function()
+  return 2
+end
+
+return T
+`;
+      const out = extractSymbolsAndCalls(src, "lua" as unknown as Lang, ".lua", "init.lua");
+      const names = out.symbols.map((s) => s.name);
+      const qnames = out.symbols.map((s) => s.qualifiedName);
+      expect(names).toContain("<module>");
+      // qualified Table.method / T:m() forms resolve to precise method symbols
+      expect(qnames).toContain("T.method");
+      expect(qnames).toContain("T:m");
+      // `local function` keeps its bare name
+      expect(names).toContain("helper");
+      // `T.f = function() … end` assignment form
+      expect(qnames).toContain("T.f");
+      const kinds = out.symbols.filter((s) => s.qualifiedName === "T.method").map((s) => s.kind);
+      expect(kinds).toContain("method");
+      // colon-call form is also a method; the plain local function is not
+      expect(out.symbols.find((s) => s.qualifiedName === "T:m")?.kind).toBe("method");
+      expect(out.symbols.find((s) => s.qualifiedName === "helper")?.kind).toBe("function");
+    });
+
+    it("attributes calls to the enclosing function", () => {
+      const src = `
+function greet(name)
+  return "hi " .. name
+end
+
+local function helper()
+  return greet("x")
+end
+`;
+      const out = extractSymbolsAndCalls(src, "lua" as unknown as Lang, ".lua", "init.lua");
+      expect(out.symbols.some((s) => s.name === "<module>")).toBe(true);
+      const greetCall = out.rawCalls.find((c) => c.calleeName === "greet");
+      expect(greetCall).toBeDefined();
+      expect(greetCall?.callerId).toContain("::helper#");
+    });
+
+    it("extracts the `local f = function() … end` assignment form", () => {
+      const src = `
+local f = function()
+  return 1
+end
+
+local g = function()
+  return f()
+end
+`;
+      const out = extractSymbolsAndCalls(src, "lua" as unknown as Lang, ".lua", "init.lua");
+      const names = out.symbols.map((s) => s.name);
+      expect(names).toContain("f");
+      expect(names).toContain("g");
+      expect(out.symbols.find((s) => s.qualifiedName === "f")?.kind).toBe("function");
+      // call to `f` lives inside `g`, so it is attributed to `g`
+      const fCall = out.rawCalls.find((c) => c.calleeName === "f");
+      expect(fCall?.callerId).toContain("::g#");
+    });
+
+    it("attributes top-level calls to <module> and resolves dotted callees", () => {
+      const src = `
+local M = require("mod")
+
+M.setup()
+
+local function run()
+  M.start()
+end
+`;
+      const out = extractSymbolsAndCalls(src, "lua" as unknown as Lang, ".lua", "init.lua");
+      // calls outside any function fall back to the synthetic <module> scope
+      const requireCall = out.rawCalls.find((c) => c.calleeName === "require");
+      expect(requireCall?.callerId).toContain("::<module>#");
+      // dotted callee `M.setup` resolves to the trailing identifier
+      const setupCall = out.rawCalls.find((c) => c.calleeName === "setup");
+      expect(setupCall).toBeDefined();
+      expect(setupCall?.callerId).toContain("::<module>#");
+      // `M.start()` lives inside `run`, so it is attributed there
+      const startCall = out.rawCalls.find((c) => c.calleeName === "start");
+      expect(startCall?.callerId).toContain("::run#");
+    });
+  });
+
+  describe("Regex fallback (Dart, Svelte, Vue, unknown)", () => {
     it("handles Dart via regex fallback", () => {
       const src = `
 String greet(String name) {
@@ -387,20 +489,6 @@ class Foo {
       const names = out.symbols.map((s) => s.name);
       // best-effort detection: should find at least one named symbol
       expect(names.length).toBeGreaterThanOrEqual(1);
-    });
-
-    it("handles Lua via regex fallback", () => {
-      const src = `
-function greet(name)
-  return "hi " .. name
-end
-
-local function helper()
-  return greet("x")
-end
-`;
-      const out = extractSymbolsAndCalls(src, "lua" as unknown as Lang, ".lua", "init.lua");
-      expect(out.symbols.some((s) => s.name === "<module>")).toBe(true);
     });
 
     it("handles unknown language without throwing", () => {

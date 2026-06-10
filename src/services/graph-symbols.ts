@@ -142,7 +142,10 @@ export function extractSymbolsAndCalls(
     if (langKey === "bash") {
       return extractFromBash(source, relativePath, language, moduleSymbol);
     }
-    // Dart, Lua, Svelte, Vue and others fall through to the regex fallback.
+    if (langKey === "lua") {
+      return extractFromLua(source, relativePath, language, moduleSymbol);
+    }
+    // Dart, Svelte, Vue and others fall through to the regex fallback.
     return extractFromRegex(source, relativePath, language, moduleSymbol);
   } catch (err) {
     if (!symbolExtractionWarned.has(langKey)) {
@@ -158,6 +161,119 @@ export function extractSymbolsAndCalls(
     }
     return { symbols: [moduleSymbol], rawCalls: [] };
   }
+}
+
+// ── Lua (namespace tables: function T.f(), local function f(), T.f = function()) ──
+
+/**
+ * Lua has no node-kind-specific extractor upstream and previously fell through
+ * to the regex fallback, which records `Mod` for `function Mod.parse()`.
+ * This walks the ast-grep Lua tree so namespace-table style (`Table.method`,
+ * the common Lua module/OOP idiom) resolves to precise qualified symbols plus
+ * their call sites.
+ */
+function extractFromLua(
+  source: string,
+  file: string,
+  language: string,
+  moduleSym: SymbolNode,
+): ExtractedSymbols {
+  const root = parse("lua" as unknown as Lang, source).root();
+  const symbols: SymbolNode[] = [moduleSym];
+  const scopes: ScopeFrame[] = [];
+  const NAME = new Set(["dot_index_expression", "method_index_expression", "identifier"]);
+  const KW = new Set([
+    "if", "for", "while", "return", "function", "local", "then", "do", "end",
+    "and", "or", "not", "elseif", "else", "in", "repeat", "until", "nil", "true", "false",
+  ]);
+  // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+  const kidsOf = (n: any): any[] => {
+    try {
+      return n.children();
+    } catch {
+      return [];
+    }
+  };
+  const shortName = (qn: string): string => {
+    const parts = qn.split(/[.:]/);
+    return parts[parts.length - 1];
+  };
+  // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+  const addSym = (nameNode: any, rangeNode: any): void => {
+    const qn = nameNode.text().replace(/\s+/g, "");
+    if (!/^[A-Za-z_][\w]*([.:][A-Za-z_][\w]*)*$/.test(qn)) return;
+    const range = rangeNode.range();
+    const startLine = range.start.line + 1;
+    const endLine = range.end.line + 1;
+    const sym: SymbolNode = {
+      id: makeId(file, qn, startLine),
+      name: shortName(qn),
+      qualifiedName: qn,
+      kind: /[.:]/.test(qn) ? "method" : "function",
+      file,
+      line: startLine,
+      endLine,
+      language,
+    };
+    symbols.push(sym);
+    scopes.push({ name: qn, startLine, endLine, symbolId: sym.id });
+  };
+
+  // `function T.f()`, `function T:m()`, `function f()`, `local function f()` —
+  // the name is the DIRECT child before `parameters`, not a body expression.
+  for (const fn of safeFindAll(root, "function_declaration")) {
+    const kids = kidsOf(fn);
+    // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+    const pIdx = kids.findIndex((c: any) => c.kind() === "parameters");
+    const limit = pIdx < 0 ? kids.length : pIdx;
+    // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+    let nameNode: any = null;
+    for (let i = 0; i < limit; i++) {
+      if (NAME.has(kids[i].kind())) {
+        nameNode = kids[i];
+        break;
+      }
+    }
+    if (nameNode) addSym(nameNode, fn);
+  }
+
+  // `T.f = function() … end` / `local f = function() … end` — the RHS must be
+  // DIRECTLY a function_definition (don't match nested anonymous functions).
+  for (const assign of safeFindAll(root, "assignment_statement")) {
+    const kids = kidsOf(assign);
+    // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+    const rhs = kids.find((c: any) => c.kind() === "expression_list");
+    if (!rhs) continue;
+    const rhs0 = kidsOf(rhs)[0];
+    if (!rhs0 || rhs0.kind() !== "function_definition") continue;
+    // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+    const vl = kids.find((c: any) => c.kind() === "variable_list");
+    const nameNode = vl ? kidsOf(vl)[0] : null;
+    if (nameNode && NAME.has(nameNode.kind())) addSym(nameNode, assign);
+  }
+
+  // Calls — attribute each to its enclosing function scope (or <module>).
+  const rawCalls: ExtractedSymbols["rawCalls"] = [];
+  for (const call of safeFindAll(root, "function_call")) {
+    const fnExpr = kidsOf(call)[0];
+    if (!fnExpr) continue;
+    const ids = safeFindAll(fnExpr, "identifier");
+    const callee =
+      ids.length > 0
+        ? ids[ids.length - 1].text()
+        : fnExpr.kind() === "identifier"
+          ? fnExpr.text()
+          : null;
+    if (!callee || KW.has(callee)) continue;
+    const line = call.range().start.line + 1;
+    rawCalls.push({
+      callerId: findCallerId(scopes, line, moduleSym.id),
+      calleeName: callee,
+      callSite: { file, line },
+    });
+  }
+
+  return { symbols, rawCalls };
 }
 
 // ── JS / TS / TSX ────────────────────────────────────────────────────────
