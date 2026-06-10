@@ -4,6 +4,16 @@ All notable changes to SocratiCode are documented here.
 This project uses [Conventional Commits](https://www.conventionalcommits.org/) and [Semantic Versioning](https://semver.org/).
 
 
+## [1.8.14](https://github.com/giancarloerra/socraticode/compare/v1.8.13...v1.8.14) (2026-06-10)
+
+### Features
+
+* **graph:** Lua symbol/call extraction + fix discovery for whitelist .gitignore ([d4bbb6c](https://github.com/giancarloerra/socraticode/commit/d4bbb6ca1c16d0fb0f2c025303d6cdcd436682f3))
+
+### Tests
+
+* **graph:** add Lua extractor + whitelist-discovery tests ([8be929a](https://github.com/giancarloerra/socraticode/commit/8be929a1c2b22dd6730c71f33a499c1b78003a49))
+
 ## [1.8.13](https://github.com/giancarloerra/socraticode/compare/v1.8.12...v1.8.13) (2026-05-27)
 
 ### Documentation
