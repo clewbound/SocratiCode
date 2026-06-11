@@ -493,6 +493,7 @@ export function ensureDynamicLanguages(): void {
       ["bash",    "@ast-grep/lang-bash"],
       ["php",     "@ast-grep/lang-php"],
       ["lua",     "@ast-grep/lang-lua"],
+      ["dart",    "@ast-grep/lang-dart"],
     ];
 
     for (const [name, pkg] of langPackages) {

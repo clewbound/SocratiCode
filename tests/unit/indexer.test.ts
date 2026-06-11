@@ -188,6 +188,48 @@ describe("indexer utilities", () => {
       }
     });
 
+    it("uses AST-aware chunking for Dart files (class and signature/body boundaries)", () => {
+      // Two large Dart classes plus a top-level function, exceeding CHUNK_SIZE
+      // lines. Dart splits a top-level function into sibling signature and
+      // body nodes; if the two were not merged into one region, the function
+      // body would be severed from its signature.
+      const method = (name: string) => {
+        const body = Array.from({ length: 12 }, (_, j) => `    final v${j} = ${j};`).join("\n");
+        return `  void ${name}() {\n${body}\n  }`;
+      };
+      // Six 14-line methods per class (~86 lines each): two classes exceed the
+      // 150-line merge cap, so the chunker must flush them as separate chunks
+      // instead of grouping them (small adjacent declarations merge by design).
+      const classOf = (name: string) =>
+        `class ${name} {\n${Array.from({ length: 6 }, (_, i) => method(`m${i}`)).join("\n")}\n}`;
+      const topFn = `Future<int> compute() async {\n${Array.from({ length: 12 }, (_, j) => `  final t${j} = ${j};`).join("\n")}\n  return 1;\n}`;
+      const content = `import 'package:foo/bar.dart';\n\n${classOf("Alpha")}\n\n${classOf("Beta")}\n\n${topFn}\n`;
+
+      const chunks = chunkFileContent("/test/app.dart", "app.dart", content);
+
+      expect(chunks.length).toBeGreaterThan(1);
+      for (const chunk of chunks) {
+        expect(chunk.language).toBe("dart");
+      }
+      // AST-aware (not line-based): each class lives in a single chunk whose
+      // content begins at the declaration. Beta spans lines ~90-175, so a
+      // fixed 100-line window would split it mid-body.
+      const lines = content.split("\n");
+      const alphaLine = lines.findIndex((l) => l.startsWith("class Alpha")) + 1;
+      expect(chunks.some((c) => c.startLine === alphaLine)).toBe(true);
+      const betaLine = lines.findIndex((l) => l.startsWith("class Beta")) + 1;
+      const betaClassLines = classOf("Beta").split("\n").length;
+      const betaChunk = chunks.find((c) => c.startLine <= betaLine && c.endLine >= betaLine);
+      expect(betaChunk).toBeDefined();
+      expect(betaChunk?.content.trim().startsWith("class Beta")).toBe(true);
+      expect(betaChunk?.endLine).toBeGreaterThanOrEqual(betaLine + betaClassLines - 1);
+      // The top-level function's signature and body stay in the same chunk.
+      const computeLine = lines.findIndex((l) => l.startsWith("Future<int> compute")) + 1;
+      const computeChunk = chunks.find((c) => c.startLine <= computeLine && c.endLine >= computeLine);
+      expect(computeChunk).toBeDefined();
+      expect(computeChunk?.content).toContain("return 1;");
+    });
+
     it("sets correct language for Python files", () => {
       const content = "def hello():\n    print('hello')";
       const chunks = chunkFileContent("/test/app.py", "app.py", content);

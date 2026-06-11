@@ -959,13 +959,15 @@ SocratiCode supports languages at three levels:
 
 ### Full Support (indexing + code graph + AST chunking)
 
-JavaScript, TypeScript, TSX, Python, Java, Kotlin, Scala, C, C++, C#, Go, Rust, Ruby, PHP, Swift, Bash/Shell, HTML, CSS/SCSS, Svelte, Vue
+JavaScript, TypeScript, TSX, Python, Java, Kotlin, Scala, C, C++, C#, Go, Rust, Ruby, PHP, Swift, Dart, Bash/Shell, HTML, CSS/SCSS, Svelte, Vue
 
 Svelte and Vue: imports extracted from `<script>` blocks (re-parsed as TypeScript) and CSS `@import`/`@require` from `<style>` blocks (any combination of `lang`, `scoped`, `module`, `global` attributes). Path aliases from `tsconfig.json`/`jsconfig.json` `compilerOptions.paths` are resolved (including `extends` chains). SCSS partial resolution (`_` prefix convention) is supported.
 
+Dart: symbols (classes, mixins, enums, extensions, typedefs, functions, getters/setters, constructors including named and factory), call sites (method calls, cascades, constructor invocations), `main()` entry-point detection, and AST chunking are all tree-sitter based; import/export/part edges are extracted via regex.
+
 ### Code Graph via Regex + Indexing
 
-Dart (import/export/part), Lua (require/dofile/loadfile), SASS, LESS (CSS `@import` extraction)
+Lua (require/dofile/loadfile), SASS, LESS (CSS `@import` extraction)
 
 ### Indexing Only (hybrid search, line-based chunking)
 

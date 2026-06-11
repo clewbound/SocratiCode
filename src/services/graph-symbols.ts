@@ -145,7 +145,10 @@ export function extractSymbolsAndCalls(
     if (langKey === "lua") {
       return extractFromLua(source, relativePath, language, moduleSymbol);
     }
-    // Dart, Svelte, Vue and others fall through to the regex fallback.
+    if (langKey === "dart") {
+      return extractFromDart(source, relativePath, language, moduleSymbol);
+    }
+    // Svelte, Vue and others fall through to the regex fallback.
     return extractFromRegex(source, relativePath, language, moduleSymbol);
   } catch (err) {
     if (!symbolExtractionWarned.has(langKey)) {
@@ -266,6 +269,216 @@ function extractFromLua(
           : null;
     if (!callee || KW.has(callee)) continue;
     const line = call.range().start.line + 1;
+    rawCalls.push({
+      callerId: findCallerId(scopes, line, moduleSym.id),
+      calleeName: callee,
+      callSite: { file, line },
+    });
+  }
+
+  return { symbols, rawCalls };
+}
+
+// ── Dart (type-first signatures, sibling signature/body pairs, selector calls) ──
+
+/**
+ * Dart previously fell through to the regex fallback, which cannot match
+ * type-first signatures (`void foo()`, `Future<int> baz() async`), so
+ * classes, methods, and call sites were invisible to the symbol graph.
+ * This walks the ast-grep Dart tree instead. Grammar quirks handled here:
+ * class/mixin/enum/extension nodes span their bodies, but a function is a
+ * `function_signature` followed by a SIBLING `function_body`, so scope
+ * ranges are stitched from each pair; plain constructors live inside a
+ * generic `declaration` wrapper; and there is no call_expression kind, so
+ * calls are recovered from `argument_part` nodes (callee = the preceding
+ * identifier or selector chain, or the `cascade_selector` for `..` calls).
+ */
+function extractFromDart(
+  source: string,
+  file: string,
+  language: string,
+  moduleSym: SymbolNode,
+): ExtractedSymbols {
+  const root = parse("dart" as unknown as Lang, source).root();
+  const symbols: SymbolNode[] = [moduleSym];
+  const scopes: ScopeFrame[] = [];
+
+  // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+  const kidsOf = (n: any): any[] => {
+    try {
+      return n.children();
+    } catch {
+      return [];
+    }
+  };
+  // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+  const childOfKind = (n: any, kind: string): any | null =>
+    // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+    kidsOf(n).find((c: any) => c.kind() === kind) ?? null;
+  // Direct identifier children only — the name slot. Type annotations are
+  // `type_identifier`/`void_type` and parameter names are nested deeper, so
+  // they never appear here.
+  // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+  const idChildren = (n: any): any[] =>
+    // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+    kidsOf(n).filter((c: any) => c.kind() === "identifier");
+
+  const addSym = (
+    name: string,
+    qualifiedName: string,
+    kind: SymbolKind,
+    startLine: number,
+    endLine: number,
+  ): void => {
+    const sym: SymbolNode = {
+      id: makeId(file, qualifiedName, startLine),
+      name,
+      qualifiedName,
+      kind,
+      file,
+      line: startLine,
+      endLine,
+      language,
+    };
+    symbols.push(sym);
+    scopes.push({ name: qualifiedName, startLine, endLine, symbolId: sym.id });
+  };
+
+  // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+  const lineOf = (n: any): number => n.range().start.line + 1;
+  // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+  const endLineOf = (n: any): number => n.range().end.line + 1;
+
+  /**
+   * Emit the member symbols of a class-like body. Members come in ordered
+   * sibling pairs: a `method_signature` (wrapping function/getter/setter/
+   * factory signatures) or a `declaration` (fields and plain constructors),
+   * optionally followed by its `function_body`.
+   */
+  // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+  const walkMembers = (bodyNode: any, owner: string): void => {
+    const members = kidsOf(bodyNode);
+    for (let i = 0; i < members.length; i++) {
+      const member = members[i];
+      const memberKind = member.kind();
+      const next = members[i + 1];
+      const scopeEnd = next && next.kind() === "function_body" ? endLineOf(next) : endLineOf(member);
+
+      if (memberKind === "method_signature") {
+        const inner = kidsOf(member)[0];
+        if (!inner) continue;
+        const innerKind = inner.kind();
+        if (innerKind === "factory_constructor_signature") {
+          const ids = idChildren(inner);
+          if (ids.length === 0) continue;
+          // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+          const qn = ids.map((c: any) => c.text()).join(".");
+          addSym(ids[ids.length - 1].text(), qn, "constructor", lineOf(member), scopeEnd);
+        } else if (
+          innerKind === "function_signature" ||
+          innerKind === "getter_signature" ||
+          innerKind === "setter_signature"
+        ) {
+          const ids = idChildren(inner);
+          if (ids.length === 0) continue;
+          const name = ids[ids.length - 1].text();
+          addSym(name, `${owner}.${name}`, "method", lineOf(member), scopeEnd);
+        }
+      } else if (memberKind === "declaration") {
+        // Plain (possibly named) constructors: `Foo(this.c);` / `Foo.named(...)`.
+        // Field declarations have no constructor_signature child and are skipped.
+        const ctor = childOfKind(member, "constructor_signature");
+        if (!ctor) continue;
+        const ids = idChildren(ctor);
+        if (ids.length === 0) continue;
+        // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+        const qn = ids.map((c: any) => c.text()).join(".");
+        addSym(ids[ids.length - 1].text(), qn, "constructor", lineOf(member), scopeEnd);
+      }
+    }
+  };
+
+  // ── Top-level declarations (ordered walk so signature/body pairs line up) ──
+  // Dart 3.3 `extension type` is NOT handled: the vendored grammar
+  // (@ast-grep/lang-dart 0.0.7) predates the syntax and parses it to ERROR
+  // nodes (no extension_type_declaration kind exists), so such declarations
+  // degrade to "not extracted" while the rest of the file extracts normally.
+  // Revisit when the upstream grammar adds the kind.
+  const topLevel = kidsOf(root);
+  for (let i = 0; i < topLevel.length; i++) {
+    const node = topLevel[i];
+    const nodeKind = node.kind();
+
+    if (nodeKind === "class_definition" || nodeKind === "mixin_declaration" || nodeKind === "extension_declaration") {
+      const nameNode = childOfKind(node, "identifier");
+      if (!nameNode) continue;
+      const name = nameNode.text();
+      const kind: SymbolKind = nodeKind === "mixin_declaration" ? "trait" : "class";
+      addSym(name, name, kind, lineOf(node), endLineOf(node));
+      const body = childOfKind(node, "class_body") ?? childOfKind(node, "extension_body");
+      if (body) walkMembers(body, name);
+    } else if (nodeKind === "enum_declaration") {
+      const nameNode = childOfKind(node, "identifier");
+      if (nameNode) addSym(nameNode.text(), nameNode.text(), "enum", lineOf(node), endLineOf(node));
+    } else if (nodeKind === "type_alias") {
+      const nameNode = childOfKind(node, "type_identifier");
+      if (nameNode) addSym(nameNode.text(), nameNode.text(), "interface", lineOf(node), endLineOf(node));
+    } else if (nodeKind === "function_signature" || nodeKind === "getter_signature" || nodeKind === "setter_signature") {
+      const ids = idChildren(node);
+      if (ids.length === 0) continue;
+      const name = ids[ids.length - 1].text();
+      const next = topLevel[i + 1];
+      const scopeEnd = next && next.kind() === "function_body" ? endLineOf(next) : endLineOf(node);
+      addSym(name, name, "function", lineOf(node), scopeEnd);
+    }
+  }
+
+  // ── Calls — every invocation wraps an `argument_part` node ──────────────
+  const rawCalls: ExtractedSymbols["rawCalls"] = [];
+  for (const ap of safeFindAll(root, "argument_part")) {
+    const holder = ap.parent();
+    if (!holder) continue;
+    const holderKind = holder.kind();
+    let callee: string | null = null;
+
+    if (holderKind === "cascade_section") {
+      // `obj..method(args)` — the callee lives in the cascade_selector.
+      const cs = childOfKind(holder, "cascade_selector");
+      const id = cs ? childOfKind(cs, "identifier") : null;
+      callee = id ? id.text() : null;
+    } else if (holderKind === "selector") {
+      // `name(args)` / `expr.name(args)` — the callee is the previous
+      // sibling: a bare identifier, or a selector whose trailing identifier
+      // is the method name (`f.bar(…)`, `mat.runApp(…)`, `Foo.create(…)`).
+      const parent = holder.parent();
+      if (!parent) continue;
+      const siblings = kidsOf(parent);
+      const hr = holder.range();
+      const idx = siblings.findIndex(
+        // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+        (c: any) => {
+          if (c.kind() !== "selector") return false;
+          const r = c.range();
+          return (
+            r.start.line === hr.start.line &&
+            r.start.column === hr.start.column &&
+            r.end.line === hr.end.line &&
+            r.end.column === hr.end.column
+          );
+        },
+      );
+      if (idx <= 0) continue;
+      const prev = siblings[idx - 1];
+      if (prev.kind() === "identifier") {
+        callee = prev.text();
+      } else if (prev.kind() === "selector") {
+        const ids = safeFindAll(prev, "identifier");
+        callee = ids.length > 0 ? ids[ids.length - 1].text() : null;
+      }
+    }
+
+    if (!callee) continue;
+    const line = ap.range().start.line + 1;
     rawCalls.push({
       callerId: findCallerId(scopes, line, moduleSym.id),
       calleeName: callee,
