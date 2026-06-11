@@ -554,6 +554,21 @@ describe("autoResumeIndexedProjects (multi-project modes)", () => {
     expect(mockUpdateProjectIndex).not.toHaveBeenCalled();
   });
 
+  it("still runs the incremental catch-up when watcher startup throws", async () => {
+    process.env.SOCRATICODE_AUTO_RESUME_PROJECTS = dirA;
+    mockStartWatching.mockRejectedValue(new Error("inotify limit reached"));
+
+    await autoResumeIndexedProjects();
+
+    // A project without a live watcher is degraded; a project with a stale
+    // index is broken for search. The catch-up must survive watcher failure.
+    expect(logger.warn).toHaveBeenCalledWith(
+      "Auto-resume: failed to start watcher, continuing with incremental catch-up",
+      expect.objectContaining({ projectPath: dirA, error: "inotify limit reached" }),
+    );
+    expect(mockUpdateProjectIndex).toHaveBeenCalledWith(dirA);
+  });
+
   it("unrecognized SOCRATICODE_AUTO_RESUME value warns and falls back to default cwd behavior", async () => {
     process.env.SOCRATICODE_AUTO_RESUME = "yes";
     mockListCollections.mockResolvedValue([collA]);

@@ -267,11 +267,21 @@ async function resumeProject(
     return;
   }
 
-  // Index is complete — start watcher and do incremental catch-up
+  // Index is complete — start watcher and do incremental catch-up.
+  // Watcher startup failure must not skip the catch-up below: a project
+  // without a live watcher is degraded, but a project with a stale index
+  // is broken for search.
   if (!isWatching(resolvedPath)) {
-    const started = await startWatching(resolvedPath);
-    if (started) {
-      logger.info("Auto-resume: started file watcher", { projectPath: resolvedPath });
+    try {
+      const started = await startWatching(resolvedPath);
+      if (started) {
+        logger.info("Auto-resume: started file watcher", { projectPath: resolvedPath });
+      }
+    } catch (err) {
+      logger.warn("Auto-resume: failed to start watcher, continuing with incremental catch-up", {
+        projectPath: resolvedPath,
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
   }
 
