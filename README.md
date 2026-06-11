@@ -1216,6 +1216,8 @@ The rest of this section documents the variables themselves. Pass them using whi
 | `SOCRATICODE_PROJECT_ID` | *(none)* | Override the auto-generated project ID. When set, all paths resolve to the same Qdrant collections, allowing multiple directories (e.g. git worktrees of the same repo) to share a single index. Must match `[a-zA-Z0-9_-]+`. Takes precedence over the `projectId` field in `.socraticode.json`. |
 | `SOCRATICODE_BRANCH_AWARE` | `false` | When `true`, append the current git branch name to the project ID, creating separate Qdrant collections per branch. Ignored when `SOCRATICODE_PROJECT_ID` is set or when `projectId` is set in `.socraticode.json`. |
 | `SOCRATICODE_LINKED_PROJECTS` | *(none)* | Comma-separated list of additional project paths to include in cross-project search. Merged with paths from `.socraticode.json`. Non-existent paths are silently skipped. |
+| `SOCRATICODE_AUTO_RESUME` | *(none)* | When set to `all`, server startup auto-resumes the file watcher plus an incremental catch-up update for **every** indexed project that has a stored path, not just the current working directory. Projects resume one at a time (sequentially) to avoid overloading the embedding provider. Skipped projects (directory no longer exists, or indexed before path tracking was added) are logged at warn level. Useful when one MCP server session should keep many canonical checkouts fresh. |
+| `SOCRATICODE_AUTO_RESUME_PROJECTS` | *(none)* | Comma-separated list of project paths to auto-resume on server startup (sequentially), e.g. `/repos/api,/repos/web`. Takes precedence over `SOCRATICODE_AUTO_RESUME`. Paths that do not exist or are not indexed are skipped with a warning. |
 | `SOCRATICODE_LOG_LEVEL` | `info` | Log verbosity: `debug`, `info`, `warn`, `error` |
 | `SOCRATICODE_LOG_FILE` | *(none)* | Absolute path to a log file. When set, all log entries are appended to this file (a session separator is written on each server start). Useful for debugging when the MCP host doesn't surface log notifications. |
 
@@ -1382,6 +1384,11 @@ then start watching.
 The watcher will not auto-start if a full index or incremental update is currently in
 progress, if the project has not been indexed yet, or if another MCP process is already
 watching the same project.
+
+If you work across many indexed repos and want all of them resumed at server startup
+(watcher plus catch-up update), not just the one you opened, see the
+`SOCRATICODE_AUTO_RESUME` and `SOCRATICODE_AUTO_RESUME_PROJECTS` environment variables
+in the [Indexing Behaviour](#indexing-behaviour) table.
 
 ### Can multiple AI agents work on the same codebase at the same time?
 
