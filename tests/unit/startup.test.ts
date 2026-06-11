@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 Giancarlo Erra - Altaire Limited
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // ── Mocks ────────────────────────────────────────────────────────────────
 // All external service dependencies are mocked so these tests run without Docker.
@@ -12,6 +15,7 @@ vi.mock("../../src/services/docker.js", () => ({
 
 vi.mock("../../src/services/qdrant.js", () => ({
   listCodebaseCollections: vi.fn(),
+  getProjectMetadata: vi.fn(),
 }));
 
 vi.mock("../../src/services/indexer.js", () => ({
@@ -56,7 +60,7 @@ import { isDockerAvailable, isQdrantRunning } from "../../src/services/docker.js
 import { getIndexingInProgressProjects, getPersistedIndexingStatus, indexProject, requestCancellation, updateProjectIndex } from "../../src/services/indexer.js";
 import { getLockHolderPid, releaseAllLocks } from "../../src/services/lock.js";
 import { logger } from "../../src/services/logger.js";
-import { listCodebaseCollections } from "../../src/services/qdrant.js";
+import { getProjectMetadata, listCodebaseCollections } from "../../src/services/qdrant.js";
 import { autoResumeIndexedProjects, awaitActiveIndexing, gracefulShutdown } from "../../src/services/startup.js";
 import { isWatching, startWatching, stopAllWatchers } from "../../src/services/watcher.js";
 
@@ -64,6 +68,7 @@ import { isWatching, startWatching, stopAllWatchers } from "../../src/services/w
 const mockIsDockerAvailable = vi.mocked(isDockerAvailable);
 const mockIsQdrantRunning = vi.mocked(isQdrantRunning);
 const mockListCollections = vi.mocked(listCodebaseCollections);
+const mockGetProjectMetadata = vi.mocked(getProjectMetadata);
 const mockGetPersistedStatus = vi.mocked(getPersistedIndexingStatus);
 const mockIndexProject = vi.mocked(indexProject);
 const mockUpdateProjectIndex = vi.mocked(updateProjectIndex);
@@ -84,6 +89,10 @@ beforeEach(() => {
   mockIsDockerAvailable.mockResolvedValue(true);
   mockIsQdrantRunning.mockResolvedValue(true);
   mockGetIndexingInProgress.mockReturnValue([]);
+  // Auto-resume mode env vars must never leak between tests (or in from the
+  // shell): default-mode tests below assume both are unset.
+  delete process.env.SOCRATICODE_AUTO_RESUME;
+  delete process.env.SOCRATICODE_AUTO_RESUME_PROJECTS;
 });
 
 // ── autoResumeIndexedProjects ────────────────────────────────────────────
@@ -315,6 +324,249 @@ describe("autoResumeIndexedProjects", () => {
       "Auto-resume failed (non-fatal)",
       expect.objectContaining({ error: "Docker daemon gone" }),
     );
+  });
+});
+
+// ── autoResumeIndexedProjects: multi-project modes (issue #70) ───────────
+
+describe("autoResumeIndexedProjects (multi-project modes)", () => {
+  // Real directories: the multi-project modes check fs.existsSync before
+  // resuming, so mocked paths are not enough.
+  let dirA: string;
+  let dirB: string;
+  let collA: string;
+  let collB: string;
+
+  const noChanges = { added: 0, updated: 0, removed: 0, chunksCreated: 0, cancelled: false };
+
+  /** Minimal valid metadata for a collection whose project lives at `projectPath`. */
+  const metadataFor = (projectPath: string) => ({
+    projectPath,
+    lastIndexedAt: "2026-01-01T00:00:00.000Z",
+    filesTotal: 1,
+    filesIndexed: 1,
+    indexingStatus: "completed" as const,
+  });
+
+  beforeEach(() => {
+    dirA = fs.mkdtempSync(path.join(os.tmpdir(), "socraticode-resume-a-"));
+    dirB = fs.mkdtempSync(path.join(os.tmpdir(), "socraticode-resume-b-"));
+    collA = collectionName(projectIdFromPath(dirA));
+    collB = collectionName(projectIdFromPath(dirB));
+
+    mockListCollections.mockResolvedValue([collA, collB]);
+    mockGetPersistedStatus.mockResolvedValue("completed");
+    mockIsWatching.mockReturnValue(false);
+    mockStartWatching.mockResolvedValue(true);
+    mockUpdateProjectIndex.mockResolvedValue(noChanges);
+  });
+
+  afterEach(() => {
+    for (const dir of [dirA, dirB]) {
+      try {
+        fs.rmSync(dir, { recursive: true, force: true });
+      } catch {
+        // best-effort cleanup
+      }
+    }
+  });
+
+  // ── SOCRATICODE_AUTO_RESUME_PROJECTS (explicit list) ───────────────────
+
+  it("resumes each listed project strictly sequentially (no embedding stampede)", async () => {
+    process.env.SOCRATICODE_AUTO_RESUME_PROJECTS = `${dirA},${dirB}`;
+
+    // Project A's catch-up is held open: B must not start until it resolves.
+    let resolveA!: (v: typeof noChanges) => void;
+    const deferredA = new Promise<typeof noChanges>((res) => {
+      resolveA = res;
+    });
+    mockUpdateProjectIndex.mockImplementation((p) =>
+      p === dirA ? deferredA : Promise.resolve(noChanges),
+    );
+
+    const run = autoResumeIndexedProjects();
+
+    await vi.waitFor(() => {
+      expect(mockUpdateProjectIndex).toHaveBeenCalledWith(dirA);
+    });
+    // The whole point of sequential resume: B has not been touched while A's
+    // update is still in flight.
+    expect(mockUpdateProjectIndex).not.toHaveBeenCalledWith(dirB);
+    expect(mockStartWatching).not.toHaveBeenCalledWith(dirB);
+
+    resolveA(noChanges);
+    await run;
+
+    expect(mockUpdateProjectIndex).toHaveBeenCalledWith(dirB);
+    expect(mockStartWatching).toHaveBeenCalledWith(dirA);
+    expect(mockStartWatching).toHaveBeenCalledWith(dirB);
+  });
+
+  it("skips list entries whose directory does not exist, with a warning, and resumes the rest", async () => {
+    const missing = path.join(os.tmpdir(), "socraticode-resume-missing-does-not-exist");
+    process.env.SOCRATICODE_AUTO_RESUME_PROJECTS = `${missing},${dirB}`;
+
+    await autoResumeIndexedProjects();
+
+    expect(logger.warn).toHaveBeenCalledWith(
+      "Auto-resume: listed project directory does not exist, skipping",
+      expect.objectContaining({ projectPath: missing }),
+    );
+    expect(mockUpdateProjectIndex).not.toHaveBeenCalledWith(missing);
+    expect(mockUpdateProjectIndex).toHaveBeenCalledWith(dirB);
+  });
+
+  it("warns (not info) when an explicitly listed project is not indexed", async () => {
+    process.env.SOCRATICODE_AUTO_RESUME_PROJECTS = dirA;
+    mockListCollections.mockResolvedValue([]); // nothing indexed
+
+    await autoResumeIndexedProjects();
+
+    // An unindexed cwd is normal (info), but an unindexed explicit entry is a
+    // misconfiguration the user asked for: it must be visible at warn level.
+    expect(logger.warn).toHaveBeenCalledWith(
+      "Auto-resume: project not yet indexed, skipping",
+      expect.objectContaining({ projectPath: dirA }),
+    );
+    expect(mockUpdateProjectIndex).not.toHaveBeenCalled();
+  });
+
+  it("deduplicates repeated list entries", async () => {
+    process.env.SOCRATICODE_AUTO_RESUME_PROJECTS = `${dirA},${dirA}, ${dirA}`;
+
+    await autoResumeIndexedProjects();
+
+    const callsForA = mockUpdateProjectIndex.mock.calls.filter(([p]) => p === dirA);
+    expect(callsForA).toHaveLength(1);
+  });
+
+  it("warns when the list contains no usable paths", async () => {
+    process.env.SOCRATICODE_AUTO_RESUME_PROJECTS = " , ,";
+
+    await autoResumeIndexedProjects();
+
+    expect(logger.warn).toHaveBeenCalledWith(
+      "Auto-resume: SOCRATICODE_AUTO_RESUME_PROJECTS is set but contains no paths",
+    );
+    expect(mockListCollections).not.toHaveBeenCalled();
+  });
+
+  it("explicit list takes precedence over SOCRATICODE_AUTO_RESUME=all", async () => {
+    process.env.SOCRATICODE_AUTO_RESUME = "all";
+    process.env.SOCRATICODE_AUTO_RESUME_PROJECTS = dirA;
+
+    await autoResumeIndexedProjects();
+
+    // =all mode would have read per-collection metadata; the explicit list
+    // must win, so metadata is never consulted.
+    expect(mockGetProjectMetadata).not.toHaveBeenCalled();
+    expect(mockUpdateProjectIndex).toHaveBeenCalledWith(dirA);
+    expect(mockUpdateProjectIndex).not.toHaveBeenCalledWith(dirB);
+  });
+
+  // ── SOCRATICODE_AUTO_RESUME=all ─────────────────────────────────────────
+
+  it("=all resumes every indexed project with a stored path, sequentially", async () => {
+    process.env.SOCRATICODE_AUTO_RESUME = "all";
+    mockGetProjectMetadata.mockImplementation(async (coll) =>
+      coll === collA ? metadataFor(dirA) : metadataFor(dirB),
+    );
+
+    await autoResumeIndexedProjects();
+
+    expect(mockUpdateProjectIndex).toHaveBeenCalledWith(dirA);
+    expect(mockUpdateProjectIndex).toHaveBeenCalledWith(dirB);
+    // Sequential: A's update was invoked before B's.
+    const orderA = mockUpdateProjectIndex.mock.invocationCallOrder[
+      mockUpdateProjectIndex.mock.calls.findIndex(([p]) => p === dirA)
+    ];
+    const orderB = mockUpdateProjectIndex.mock.invocationCallOrder[
+      mockUpdateProjectIndex.mock.calls.findIndex(([p]) => p === dirB)
+    ];
+    expect(orderA).toBeLessThan(orderB);
+  });
+
+  it("=all warns and skips collections without a stored path (indexed before path tracking)", async () => {
+    process.env.SOCRATICODE_AUTO_RESUME = "all";
+    mockGetProjectMetadata.mockImplementation(async (coll) =>
+      coll === collA ? null : metadataFor(dirB),
+    );
+
+    await autoResumeIndexedProjects();
+
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining("no stored path"),
+      expect.objectContaining({ collection: collA }),
+    );
+    expect(mockUpdateProjectIndex).not.toHaveBeenCalledWith(dirA);
+    expect(mockUpdateProjectIndex).toHaveBeenCalledWith(dirB);
+  });
+
+  it("=all warns and skips stored paths that no longer exist on disk", async () => {
+    process.env.SOCRATICODE_AUTO_RESUME = "all";
+    const gone = path.join(os.tmpdir(), "socraticode-resume-gone-does-not-exist");
+    mockGetProjectMetadata.mockImplementation(async (coll) =>
+      coll === collA ? metadataFor(gone) : metadataFor(dirB),
+    );
+
+    await autoResumeIndexedProjects();
+
+    expect(logger.warn).toHaveBeenCalledWith(
+      "Auto-resume: indexed project directory no longer exists, skipping",
+      expect.objectContaining({ projectPath: gone }),
+    );
+    expect(mockUpdateProjectIndex).not.toHaveBeenCalledWith(gone);
+    expect(mockUpdateProjectIndex).toHaveBeenCalledWith(dirB);
+  });
+
+  it("=all continues with remaining projects when one resume fails", async () => {
+    process.env.SOCRATICODE_AUTO_RESUME = "all";
+    mockGetProjectMetadata.mockImplementation(async (coll) =>
+      coll === collA ? metadataFor(dirA) : metadataFor(dirB),
+    );
+    // A failure outside resumeProject's internal non-fatal handling: the
+    // status lookup itself blows up for A.
+    mockGetPersistedStatus.mockImplementation(async (p) => {
+      if (p === dirA) throw new Error("Qdrant hiccup");
+      return "completed";
+    });
+
+    await autoResumeIndexedProjects();
+
+    expect(logger.warn).toHaveBeenCalledWith(
+      "Auto-resume: project resume failed, continuing with remaining projects",
+      expect.objectContaining({ projectPath: dirA, error: "Qdrant hiccup" }),
+    );
+    expect(mockUpdateProjectIndex).toHaveBeenCalledWith(dirB);
+  });
+
+  it("=all logs and does nothing when no projects are indexed", async () => {
+    process.env.SOCRATICODE_AUTO_RESUME = "all";
+    mockListCollections.mockResolvedValue([]);
+
+    await autoResumeIndexedProjects();
+
+    expect(logger.info).toHaveBeenCalledWith(
+      "Auto-resume: no indexed projects found, nothing to resume",
+    );
+    expect(mockGetProjectMetadata).not.toHaveBeenCalled();
+    expect(mockUpdateProjectIndex).not.toHaveBeenCalled();
+  });
+
+  it("unrecognized SOCRATICODE_AUTO_RESUME value warns and falls back to default cwd behavior", async () => {
+    process.env.SOCRATICODE_AUTO_RESUME = "yes";
+    mockListCollections.mockResolvedValue([collA]);
+
+    await autoResumeIndexedProjects(dirA);
+
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining("unrecognized SOCRATICODE_AUTO_RESUME value"),
+      expect.objectContaining({ value: "yes" }),
+    );
+    // Default behavior still runs for the provided (cwd) project.
+    expect(mockStartWatching).toHaveBeenCalledWith(dirA);
+    expect(mockUpdateProjectIndex).toHaveBeenCalledWith(dirA);
   });
 });
 
