@@ -4,6 +4,16 @@ All notable changes to SocratiCode are documented here.
 This project uses [Conventional Commits](https://www.conventionalcommits.org/) and [Semantic Versioning](https://semver.org/).
 
 
+## [1.8.15](https://github.com/giancarloerra/socraticode/compare/v1.8.14...v1.8.15) (2026-06-11)
+
+### Features
+
+* **startup:** opt-in auto-resume of all indexed projects ([#70](https://github.com/giancarloerra/socraticode/issues/70)) ([f3362bb](https://github.com/giancarloerra/socraticode/commit/f3362bbe7d36067ba5bbdb45d99f6c4d2f051f3b))
+
+### Bug Fixes
+
+* **startup:** keep incremental catch-up alive when watcher startup throws ([fa4dd92](https://github.com/giancarloerra/socraticode/commit/fa4dd92196dd847bfb68460df0d278f0a9b5ff8f))
+
 ## [1.8.14](https://github.com/giancarloerra/socraticode/compare/v1.8.13...v1.8.14) (2026-06-10)
 
 ### Features
