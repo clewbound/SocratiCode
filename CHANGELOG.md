@@ -4,6 +4,16 @@ All notable changes to SocratiCode are documented here.
 This project uses [Conventional Commits](https://www.conventionalcommits.org/) and [Semantic Versioning](https://semver.org/).
 
 
+## [1.8.16](https://github.com/giancarloerra/socraticode/compare/v1.8.15...v1.8.16) (2026-06-11)
+
+### Features
+
+* **graph:** full Dart support via tree-sitter AST ([#71](https://github.com/giancarloerra/socraticode/issues/71)) ([7bd9eb5](https://github.com/giancarloerra/socraticode/commit/7bd9eb5308eb6201515ff03f8007c512812824aa))
+
+### Tests
+
+* **graph:** pin graceful degradation for Dart extension types ([c5a706c](https://github.com/giancarloerra/socraticode/commit/c5a706cc718a3b0743a5451e7c735df9c6cfbfea))
+
 ## [1.8.15](https://github.com/giancarloerra/socraticode/compare/v1.8.14...v1.8.15) (2026-06-11)
 
 ### Features
