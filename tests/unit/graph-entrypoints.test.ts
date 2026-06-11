@@ -96,6 +96,28 @@ describe("graph-entrypoints", () => {
     expect(entries.some((e) => e.name === "main")).toBe(true);
   });
 
+  it("detects Dart main() as a conventional entry point", () => {
+    const graph: CodeGraph = {
+      nodes: [
+        {
+          relativePath: "lib/main.dart",
+          imports: [],
+          exports: [],
+          dependencies: [],
+          dependents: ["lib/app.dart"], // not an orphan — name heuristic must fire
+        },
+      ],
+      edges: [],
+    };
+    const payloads: SymbolGraphFilePayload[] = [
+      { ...mkPayload("lib/main.dart", [{ name: "main", line: 3 }]), language: "dart" },
+    ];
+    const entries = detectEntryPoints(graph, payloads);
+    const main = entries.find((e) => e.name === "main");
+    expect(main).toBeDefined();
+    expect(main?.reason).toBe("well-known-name:main");
+  });
+
   it("returns empty array when nothing matches", () => {
     const graph: CodeGraph = { nodes: [], edges: [] };
     const entries = detectEntryPoints(graph, []);

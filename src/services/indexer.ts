@@ -272,6 +272,11 @@ const TOP_LEVEL_KINDS: Record<string, string[]> = {
   php:        ["function_definition", "class_declaration", "method_declaration", "trait_declaration"],
   swift:      ["function_declaration", "class_declaration", "struct_declaration", "protocol_declaration", "extension_declaration"],
   bash:       ["function_definition"],
+  // Dart: class/mixin/enum/extension nodes span their bodies, but a top-level
+  // function is a `function_signature` followed by a SIBLING `function_body`
+  // starting on the same line. Both kinds are listed so the overlap-merge in
+  // findAstBoundaries fuses each signature/body pair into one region.
+  dart:       ["class_definition", "mixin_declaration", "enum_declaration", "extension_declaration", "type_alias", "function_signature", "function_body"],
 };
 
 /** Minimum lines for a chunk to stand on its own (otherwise merge with neighbors) */

@@ -163,6 +163,7 @@ export const ENTRY_POINT_NAMES: Record<string, Set<string>> = {
   swift: new Set(["main"]),
   ruby: new Set(["main"]),
   php: new Set(["main"]),
+  dart: new Set(["main"]),
 };
 
 // ── Path normalization ──────────────────────────────────────────────────

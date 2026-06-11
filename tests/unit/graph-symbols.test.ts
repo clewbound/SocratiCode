@@ -472,25 +472,123 @@ end
     });
   });
 
-  describe("Regex fallback (Dart, Svelte, Vue, unknown)", () => {
-    it("handles Dart via regex fallback", () => {
+  describe("Dart", () => {
+    it("extracts type-first declarations the regex fallback could never match", () => {
       const src = `
-String greet(String name) {
-  return 'Hi $name';
+class Foo {
+  Foo(int c);
+  Foo.named(int c);
+  factory Foo.create() => Foo(1);
+  void bar(int x) {
+    helper(x);
+  }
+  String get name => 'foo';
+  set name(String v) {}
 }
 
-class Foo {
-  int bar() => 1;
+mixin Loggable {
+  void log(String msg) {}
+}
+
+enum Color { red, green }
+
+extension StrExt on String {
+  int len() => length;
+}
+
+typedef Callback = void Function(int);
+
+Future<int> fetchCount() async {
+  return 1;
 }
 `;
-      const out = extractSymbolsAndCalls(src, "dart" as unknown as Lang, ".dart", "main.dart");
-      // regex fallback should at least produce <module> and not throw
-      expect(out.symbols.some((s) => s.name === "<module>")).toBe(true);
-      const names = out.symbols.map((s) => s.name);
-      // best-effort detection: should find at least one named symbol
-      expect(names.length).toBeGreaterThanOrEqual(1);
+      const out = extractSymbolsAndCalls(src, "dart" as unknown as Lang, ".dart", "lib/foo.dart");
+      const has = (qn: string, kind: string) =>
+        out.symbols.some((s) => s.qualifiedName === qn && s.kind === kind);
+
+      expect(has("Foo", "class")).toBe(true);
+      // Constructors: plain, named, and factory all resolve as constructors
+      // with dotted qualified names — the regex fallback saw none of these.
+      // The plain constructor deliberately shares the class's qualified name
+      // (that is how call sites reference it); they differ by kind and line.
+      expect(has("Foo", "constructor")).toBe(true);
+      expect(has("Foo.named", "constructor")).toBe(true);
+      expect(has("Foo.create", "constructor")).toBe(true);
+      expect(has("Foo.bar", "method")).toBe(true);
+      // Getter and setter share a name but live on different lines (distinct ids)
+      const nameSyms = out.symbols.filter((s) => s.qualifiedName === "Foo.name");
+      expect(nameSyms).toHaveLength(2);
+      expect(has("Loggable", "trait")).toBe(true);
+      expect(has("Loggable.log", "method")).toBe(true);
+      expect(has("Color", "enum")).toBe(true);
+      expect(has("StrExt.len", "method")).toBe(true);
+      expect(has("Callback", "interface")).toBe(true);
+      // Type-first top-level signature (`Future<int> fetchCount()`)
+      expect(has("fetchCount", "function")).toBe(true);
     });
 
+    it("stitches a top-level function's scope from its sibling signature and body", () => {
+      const src = `
+void helper(int x) {
+  print(x);
+  print(x + 1);
+}
+`;
+      const out = extractSymbolsAndCalls(src, "dart" as unknown as Lang, ".dart", "lib/h.dart");
+      const helper = out.symbols.find((s) => s.qualifiedName === "helper");
+      // The signature node alone ends on line 2; the scope must reach the
+      // body's closing brace, otherwise calls inside attribute to <module>.
+      expect(helper?.line).toBe(2);
+      expect(helper?.endLine).toBe(5);
+      const printCall = out.rawCalls.find((c) => c.calleeName === "print");
+      expect(printCall?.callerId).toContain("::helper#");
+    });
+
+    it("attributes method calls, cascades, and constructor invocations to the enclosing scope", () => {
+      const src = `
+class Foo {
+  void bar(int x) {}
+  Future<void> load() async {}
+}
+
+void main() {
+  final f = Foo(1);
+  f.bar(2);
+  f..bar(3)..load();
+  mat.runApp();
+  helper(5);
+}
+`;
+      const out = extractSymbolsAndCalls(src, "dart" as unknown as Lang, ".dart", "lib/main.dart");
+      const fromMain = out.rawCalls.filter((c) => c.callerId.includes("::main#"));
+      const callees = fromMain.map((c) => c.calleeName);
+
+      // Constructor invocation (`Foo(1)`, no `new` keyword in modern Dart)
+      expect(callees).toContain("Foo");
+      // Plain method call `f.bar(2)`
+      expect(callees).toContain("bar");
+      // Cascade `..load()` — a Dart-only form with its own grammar shape
+      expect(callees).toContain("load");
+      // Prefixed call `mat.runApp()` resolves to the trailing identifier
+      expect(callees).toContain("runApp");
+      // Bare call
+      expect(callees).toContain("helper");
+    });
+
+    it("detects main() so Dart apps get a conventional entry point", () => {
+      const src = `
+void main() {
+  runApp();
+}
+`;
+      const out = extractSymbolsAndCalls(src, "dart" as unknown as Lang, ".dart", "bin/app.dart");
+      const main = out.symbols.find((s) => s.name === "main");
+      expect(main).toBeDefined();
+      expect(main?.kind).toBe("function");
+    });
+  });
+
+  describe("Regex fallback (Svelte, Vue, unknown)", () => {
     it("handles unknown language without throwing", () => {
       const src = "some random text\nwith no recognizable structure";
       const out = extractSymbolsAndCalls(
