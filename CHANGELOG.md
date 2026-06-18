@@ -4,6 +4,12 @@ All notable changes to SocratiCode are documented here.
 This project uses [Conventional Commits](https://www.conventionalcommits.org/) and [Semantic Versioning](https://semver.org/).
 
 
+## [1.8.17](https://github.com/giancarloerra/socraticode/compare/v1.8.16...v1.8.17) (2026-06-18)
+
+### Bug Fixes
+
+* **graph:** extract Dart abstract members and operators ([#74](https://github.com/giancarloerra/socraticode/issues/74)) ([0ab502b](https://github.com/giancarloerra/socraticode/commit/0ab502b99b25162b41657844168d1078685e5190))
+
 ## [1.8.16](https://github.com/giancarloerra/socraticode/compare/v1.8.15...v1.8.16) (2026-06-11)
 
 ### Features
