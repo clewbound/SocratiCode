@@ -66,17 +66,24 @@ function uuidFromString(input: string): string {
   return `${hash.slice(0, 8)}-${hash.slice(8, 12)}-${hash.slice(12, 16)}-${hash.slice(16, 20)}-${hash.slice(20, 32)}`;
 }
 
-function metaPointId(projectId: string): string {
-  return uuidFromString(`${projectId}::meta`);
+// Symgraph point IDs are derived from content alone — the enclosing
+// collection name already incorporates `${projectId}` (see
+// symgraph{Meta,File,Index}CollectionName), so adding projectId here would
+// be redundant. Keeping IDs project-independent is what makes the
+// sibling-clone path work: snapshot+recover preserves point IDs verbatim,
+// so a clone is read-correct only if every collection-internal lookup uses
+// IDs derived without the projectId.
+function metaPointId(): string {
+  return uuidFromString(`meta`);
 }
-function filePointId(projectId: string, relativePath: string): string {
-  return uuidFromString(`${projectId}::file::${relativePath}`);
+function filePointId(relativePath: string): string {
+  return uuidFromString(`file::${relativePath}`);
 }
-function nameShardPointId(projectId: string, shardKey: string): string {
-  return uuidFromString(`${projectId}::nameidx::${shardKey}`);
+function nameShardPointId(shardKey: string): string {
+  return uuidFromString(`nameidx::${shardKey}`);
 }
-function revShardPointId(projectId: string, bucketHex: string): string {
-  return uuidFromString(`${projectId}::revidx::${bucketHex}`);
+function revShardPointId(bucketHex: string): string {
+  return uuidFromString(`revidx::${bucketHex}`);
 }
 
 // ── Collection lifecycle ─────────────────────────────────────────────────
@@ -123,7 +130,7 @@ export async function saveSymbolGraphMeta(
   await ensureCollection(collName);
   const qdrant = getClient();
   await qdrant.upsert(collName, {
-    points: [{ id: metaPointId(projectId), vector: [0], payload: { meta } }],
+    points: [{ id: metaPointId(), vector: [0], payload: { meta } }],
   });
 }
 
@@ -135,7 +142,7 @@ export async function loadSymbolGraphMeta(
     await ensureCollection(collName);
     const qdrant = getClient();
     const points = await qdrant.retrieve(collName, {
-      ids: [metaPointId(projectId)],
+      ids: [metaPointId()],
       with_payload: true,
     });
     if (points.length === 0) return null;
@@ -162,7 +169,7 @@ export async function saveFilePayload(
   await qdrant.upsert(collName, {
     points: [
       {
-        id: filePointId(projectId, payload.file),
+        id: filePointId(payload.file),
         vector: [0],
         payload: { filePayload: payload },
       },
@@ -185,7 +192,7 @@ export async function saveFilePayloads(
     const slice = payloads.slice(i, i + CHUNK);
     await qdrant.upsert(collName, {
       points: slice.map((p) => ({
-        id: filePointId(projectId, p.file),
+        id: filePointId(p.file),
         vector: [0],
         payload: { filePayload: p },
       })),
@@ -202,7 +209,7 @@ export async function loadFilePayload(
     await ensureCollection(collName);
     const qdrant = getClient();
     const points = await qdrant.retrieve(collName, {
-      ids: [filePointId(projectId, relativePath)],
+      ids: [filePointId(relativePath)],
       with_payload: true,
     });
     if (points.length === 0) return null;
@@ -226,7 +233,7 @@ export async function deleteFilePayload(
     await ensureCollection(collName);
     const qdrant = getClient();
     await qdrant.delete(collName, {
-      points: [filePointId(projectId, relativePath)],
+      points: [filePointId(relativePath)],
     });
   } catch (err) {
     logger.warn("deleteFilePayload failed (ignored)", {
@@ -250,7 +257,7 @@ export async function saveNameShard(
   await qdrant.upsert(collName, {
     points: [
       {
-        id: nameShardPointId(projectId, shardKey),
+        id: nameShardPointId(shardKey),
         vector: [0],
         payload: { kind: "name", shard: shardKey, nameToSymbols },
       },
@@ -267,7 +274,7 @@ export async function loadNameShard(
     await ensureCollection(collName);
     const qdrant = getClient();
     const points = await qdrant.retrieve(collName, {
-      ids: [nameShardPointId(projectId, shardKey)],
+      ids: [nameShardPointId(shardKey)],
       with_payload: true,
     });
     if (points.length === 0) return null;
@@ -296,7 +303,7 @@ export async function saveReverseShard(
   await qdrant.upsert(collName, {
     points: [
       {
-        id: revShardPointId(projectId, bucketHex),
+        id: revShardPointId(bucketHex),
         vector: [0],
         payload: { kind: "reverse", bucket, reverseEdges },
       },
@@ -314,7 +321,7 @@ export async function loadReverseShard(
     const qdrant = getClient();
     const bucketHex = reverseShardHex(bucket);
     const points = await qdrant.retrieve(collName, {
-      ids: [revShardPointId(projectId, bucketHex)],
+      ids: [revShardPointId(bucketHex)],
       with_payload: true,
     });
     if (points.length === 0) return null;

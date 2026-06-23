@@ -118,7 +118,7 @@ export function projectIdFromPath(folderPath: string): string {
  * Core project ID: SHA-256 hash of the resolved path, without branch suffix.
  * Used as the default fallback when no explicit project ID is configured.
  */
-function coreProjectId(folderPath: string): string {
+export function coreProjectId(folderPath: string): string {
   const normalized = path.resolve(folderPath);
   return createHash("sha256").update(normalized).digest("hex").slice(0, 12);
 }

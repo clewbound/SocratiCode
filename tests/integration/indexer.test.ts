@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 Giancarlo Erra - Altaire Limited
 
+import { execSync } from "node:child_process";
+import { writeFileSync } from "node:fs";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { collectionName, projectIdFromPath } from "../../src/config.js";
+import { collectionName, coreProjectId, projectIdFromPath } from "../../src/config.js";
 import { ensureQdrantReady } from "../../src/services/docker.js";
 import {
   getIndexableFiles,
@@ -15,7 +17,7 @@ import {
   updateProjectIndex,
 } from "../../src/services/indexer.js";
 import { ensureOllamaReady } from "../../src/services/ollama.js";
-import { getCollectionInfo, searchChunks } from "../../src/services/qdrant.js";
+import { deleteCollection, getCollectionInfo, searchChunks } from "../../src/services/qdrant.js";
 import {
   addFileToFixture,
   createFixtureProject,
@@ -256,4 +258,428 @@ export function handleWebhook(payload: unknown): { status: string } {
       expect(info).toBeNull();
     });
   });
+});
+
+describe.skipIf(!dockerAvailable)("indexer service — embedding cache", () => {
+  let cacheFixture: FixtureProject;
+  const cacheCollName = "socraticode_embedding_cache";
+  const populateProjectId = "indexer-cache-populate";
+  const reuseProjectId = "indexer-cache-reuse";
+
+  beforeAll(async () => {
+    await ensureQdrantReady();
+    await ensureOllamaReady();
+    await waitForQdrant();
+    await waitForOllama();
+
+    cacheFixture = createFixtureProject("indexer-cache-test");
+    process.env.SOCRATICODE_EMBEDDING_CACHE = "true";
+
+    // Start with a clean cache collection so test assertions about growth are
+    // deterministic.
+    try {
+      await deleteCollection(cacheCollName);
+    } catch {
+      // ignore — collection may not exist yet
+    }
+  });
+
+  afterAll(async () => {
+    delete process.env.SOCRATICODE_EMBEDDING_CACHE;
+
+    // Clean up the sibling project collections we created.
+    for (const projectId of [populateProjectId, reuseProjectId]) {
+      process.env.SOCRATICODE_PROJECT_ID = projectId;
+      try {
+        await removeProjectIndex(cacheFixture.root);
+      } catch {
+        // ignore
+      }
+    }
+    delete process.env.SOCRATICODE_PROJECT_ID;
+
+    try {
+      await deleteCollection(cacheCollName);
+    } catch {
+      // ignore
+    }
+
+    cacheFixture.cleanup();
+  });
+
+  it(
+    "populates the shared cache on a fresh index",
+    async () => {
+      process.env.SOCRATICODE_PROJECT_ID = populateProjectId;
+      const result = await indexProject(cacheFixture.root);
+      expect(result.chunksCreated).toBeGreaterThan(0);
+
+      const cacheInfo = await getCollectionInfo(cacheCollName);
+      expect(cacheInfo).not.toBeNull();
+      expect(cacheInfo?.pointsCount).toBeGreaterThan(0);
+    },
+    180_000,
+  );
+
+  it(
+    "reuses cached vectors when indexing a sibling collection on identical content",
+    async () => {
+      const cacheBefore = (await getCollectionInfo(cacheCollName))?.pointsCount ?? 0;
+      expect(cacheBefore).toBeGreaterThan(0);
+
+      // Same fixture content, different project ID → fresh per-collection
+      // skip-by-hash state forces a re-index, but the shared cache should
+      // catch every file.
+      process.env.SOCRATICODE_PROJECT_ID = reuseProjectId;
+      const messages: string[] = [];
+      const result = await indexProject(cacheFixture.root, (m) => messages.push(m));
+      expect(result.chunksCreated).toBeGreaterThan(0);
+
+      // Cache point count must not grow — every file was a hit.
+      const cacheAfter = (await getCollectionInfo(cacheCollName))?.pointsCount ?? 0;
+      expect(cacheAfter).toBe(cacheBefore);
+
+      // The indexer should advertise the cache hit in its progress messages.
+      expect(
+        messages.some((m) => m.includes("reused from shared cache")),
+      ).toBe(true);
+    },
+    180_000,
+  );
+});
+
+describe.skipIf(!dockerAvailable)("indexer service — same-collection fast-skip", () => {
+  beforeAll(async () => {
+    await ensureQdrantReady();
+    await ensureOllamaReady();
+    await waitForQdrant();
+    await waitForOllama();
+  });
+
+  it(
+    "skips scan + embed when re-indexing an unchanged branch (same-collection fast path)",
+    async () => {
+      const fixture = createFixtureProject("fast-skip-test");
+      try {
+        // Fast-path requires a git index — initialise the fixture as a git repo
+        // and stage every file so getGitBlobShas can read blob shas.
+        const gitOpts = {
+          cwd: fixture.root,
+          stdio: "ignore" as const,
+          env: {
+            ...process.env,
+            GIT_AUTHOR_NAME: "Fast Skip Test",
+            GIT_AUTHOR_EMAIL: "fast-skip@example.com",
+            GIT_COMMITTER_NAME: "Fast Skip Test",
+            GIT_COMMITTER_EMAIL: "fast-skip@example.com",
+          },
+        };
+        execSync("git init -q", gitOpts);
+        execSync("git add -A", gitOpts);
+        execSync("git commit -q -m initial", gitOpts);
+
+        process.env.SOCRATICODE_PROJECT_ID = "fast-skip-populate";
+        const first = await indexProject(fixture.root);
+        expect(first.chunksCreated).toBeGreaterThan(0);
+
+        // Second index on the SAME collection with no file changes
+        const messages: string[] = [];
+        const start = Date.now();
+        const second = await indexProject(fixture.root, (m) => messages.push(m));
+        const elapsedMs = Date.now() - start;
+
+        // Fast-path took: explicit fast-path progress message must be present.
+        expect(messages.some((m) => /fast.path/i.test(m))).toBe(true);
+
+        // Fast-path skipped scan + embed: no "indexable files" scan message
+        // and no "generating embeddings" message.
+        expect(messages.some((m) => m.includes("indexable files"))).toBe(false);
+        expect(messages.some((m) => m.includes("generating embeddings"))).toBe(false);
+
+        expect(elapsedMs).toBeLessThan(30_000);
+        expect(second.chunksCreated).toBe(0);
+      } finally {
+        try {
+          await removeProjectIndex(fixture.root);
+        } catch {
+          // ignore
+        }
+        delete process.env.SOCRATICODE_PROJECT_ID;
+        fixture.cleanup();
+      }
+    },
+    300_000,
+  );
+});
+
+describe.skipIf(!dockerAvailable)("indexer service — sibling-clone fast path", () => {
+  beforeAll(async () => {
+    await ensureQdrantReady();
+    await ensureOllamaReady();
+    await waitForQdrant();
+    await waitForOllama();
+  });
+
+  // Initialise a fixture as a git repo and stage every file so getGitBlobShas
+  // can produce blob shas. Mirrors the same-collection fast-skip test setup.
+  function initGitFixture(fixture: FixtureProject): void {
+    const gitOpts = {
+      cwd: fixture.root,
+      stdio: "ignore" as const,
+      env: {
+        ...process.env,
+        GIT_AUTHOR_NAME: "Sibling Clone Test",
+        GIT_AUTHOR_EMAIL: "sibling-clone@example.com",
+        GIT_COMMITTER_NAME: "Sibling Clone Test",
+        GIT_COMMITTER_EMAIL: "sibling-clone@example.com",
+      },
+    };
+    execSync("git init -q", gitOpts);
+    execSync("git add -A", gitOpts);
+    execSync("git commit -q -m initial", gitOpts);
+  }
+
+  function commitFileChange(fixture: FixtureProject, relativePath: string, newContent: string): void {
+    const fullPath = path.join(fixture.root, relativePath);
+    writeFileSync(fullPath, newContent);
+    const gitOpts = {
+      cwd: fixture.root,
+      stdio: "ignore" as const,
+      env: {
+        ...process.env,
+        GIT_AUTHOR_NAME: "Sibling Clone Test",
+        GIT_AUTHOR_EMAIL: "sibling-clone@example.com",
+        GIT_COMMITTER_NAME: "Sibling Clone Test",
+        GIT_COMMITTER_EMAIL: "sibling-clone@example.com",
+      },
+    };
+    execSync(`git add ${relativePath}`, gitOpts);
+    execSync(`git commit -q -m "modify ${relativePath}"`, gitOpts);
+  }
+
+  it(
+    "indexes a fresh collection in seconds when content matches sibling",
+    async () => {
+      const fixture = createFixtureProject("clone-no-diff");
+      // Sibling discovery filters by `coreProjectId` (path hash), so
+      // source + target ids must share that prefix and only differ in the
+      // branch-aware suffix the production naming uses.
+      const coreId = coreProjectId(fixture.root);
+      const sourceId = `${coreId}__source`;
+      const targetId = `${coreId}__target`;
+      try {
+        initGitFixture(fixture);
+
+        process.env.SOCRATICODE_PROJECT_ID = sourceId;
+        const first = await indexProject(fixture.root);
+        expect(first.chunksCreated).toBeGreaterThan(0);
+
+        // Re-index under a different project ID with the same content.
+        process.env.SOCRATICODE_PROJECT_ID = targetId;
+        const messages: string[] = [];
+        const start = Date.now();
+        const result = await indexProject(fixture.root, (m) => messages.push(m));
+        const elapsedMs = Date.now() - start;
+
+        expect(messages.some((m) => /sibling.clone|cloned.*\d+ points|fast.path/i.test(m))).toBe(true);
+        expect(elapsedMs).toBeLessThan(60_000);
+        expect(result.chunksCreated).toBe(0);
+      } finally {
+        for (const projectId of [sourceId, targetId]) {
+          process.env.SOCRATICODE_PROJECT_ID = projectId;
+          try {
+            await removeProjectIndex(fixture.root);
+          } catch {
+            // ignore
+          }
+        }
+        delete process.env.SOCRATICODE_PROJECT_ID;
+        fixture.cleanup();
+      }
+    },
+    300_000,
+  );
+
+  it(
+    "scans only the diff when a file is modified",
+    async () => {
+      const fixture = createFixtureProject("clone-with-diff");
+      const coreId = coreProjectId(fixture.root);
+      const sourceId = `${coreId}__diff-source`;
+      const targetId = `${coreId}__diff-target`;
+      try {
+        initGitFixture(fixture);
+
+        process.env.SOCRATICODE_PROJECT_ID = sourceId;
+        const first = await indexProject(fixture.root);
+        const baselineChunks = first.chunksCreated;
+        expect(baselineChunks).toBeGreaterThan(0);
+
+        // Modify a single file already created by the fixture.
+        commitFileChange(
+          fixture,
+          "src/utils/math.ts",
+          `// changed
+export function add(a: number, b: number): number {
+  return a + b + 0;
+}
+
+export function fibonacci(n: number): number {
+  // Brand new fibonacci with detailed tail-call discussion to ensure new
+  // chunks are produced even on a small file.
+  if (n < 2) return n;
+  let prev = 0;
+  let curr = 1;
+  for (let i = 2; i <= n; i++) {
+    const next = prev + curr;
+    prev = curr;
+    curr = next;
+  }
+  return curr;
+}
+`,
+        );
+
+        process.env.SOCRATICODE_PROJECT_ID = targetId;
+        const messages: string[] = [];
+        const start = Date.now();
+        const result = await indexProject(fixture.root, (m) => messages.push(m));
+        const elapsedMs = Date.now() - start;
+
+        expect(messages.some((m) => /sibling.clone/i.test(m))).toBe(true);
+        expect(result.chunksCreated).toBeGreaterThan(0);
+        expect(result.chunksCreated).toBeLessThan(baselineChunks);
+        expect(elapsedMs).toBeLessThan(90_000);
+      } finally {
+        for (const projectId of [sourceId, targetId]) {
+          process.env.SOCRATICODE_PROJECT_ID = projectId;
+          try {
+            await removeProjectIndex(fixture.root);
+          } catch {
+            // ignore
+          }
+        }
+        delete process.env.SOCRATICODE_PROJECT_ID;
+        fixture.cleanup();
+      }
+    },
+    300_000,
+  );
+
+  it(
+    "preserves cloned chunks for unchanged files when one file is modified (regression)",
+    async () => {
+      // Regression test for the bug where scanAndIndexFiles' cleanup loop
+      // deleted chunks for every path in `hashes` that wasn't in `targetFiles`.
+      // The sibling-clone gate seeds `hashes` with diff.unchanged paths and
+      // passes `targetFiles = modified ∪ added`, so every unchanged path was
+      // misidentified as deleted and its chunks were destroyed. The fix
+      // passes `currentFileSet = new Set(allFiles)` so the cleanup loop only
+      // evicts chunks for files genuinely missing from disk.
+      const fixture = createFixtureProject("clone-preserve-unchanged");
+      const coreId = coreProjectId(fixture.root);
+      const sourceId = `${coreId}__preserve-source`;
+      const targetId = `${coreId}__preserve-target`;
+      try {
+        initGitFixture(fixture);
+
+        process.env.SOCRATICODE_PROJECT_ID = sourceId;
+        const first = await indexProject(fixture.root);
+        expect(first.chunksCreated).toBeGreaterThan(0);
+
+        // Modify one file. Other fixture files (src/index.ts, src/types.ts,
+        // src/utils/helpers.ts, lib/data_processor.py, README.md, package.json)
+        // remain unchanged and their chunks must survive the clone.
+        commitFileChange(
+          fixture,
+          "src/utils/math.ts",
+          `// changed
+export function add(a: number, b: number): number {
+  return a + b + 0;
+}
+`,
+        );
+
+        process.env.SOCRATICODE_PROJECT_ID = targetId;
+        const messages: string[] = [];
+        const result = await indexProject(fixture.root, (m) => messages.push(m));
+        expect(messages.some((m) => /sibling.clone/i.test(m))).toBe(true);
+        expect(result.chunksCreated).toBeGreaterThan(0);
+
+        const targetCollection = collectionName(targetId);
+        const qdrant = (await import("../../src/services/qdrant.js")).getClient();
+
+        // Pull all points whose relativePath matches an unchanged file.
+        // searchChunks with a fileFilter does prefix-style matching via
+        // payload, but `qdrant.scroll` with an exact-value filter is the
+        // most precise way to count surviving chunks for a given path.
+        async function countChunksForPath(relPath: string): Promise<number> {
+          const scrolled = await qdrant.scroll(targetCollection, {
+            limit: 50,
+            with_payload: false,
+            with_vector: false,
+            filter: {
+              must: [{ key: "relativePath", match: { value: relPath } }],
+            },
+          });
+          return scrolled.points.length;
+        }
+
+        const unchangedSurvivors = {
+          "src/index.ts": await countChunksForPath("src/index.ts"),
+          "src/types.ts": await countChunksForPath("src/types.ts"),
+          "src/utils/helpers.ts": await countChunksForPath("src/utils/helpers.ts"),
+          "lib/data_processor.py": await countChunksForPath("lib/data_processor.py"),
+        };
+
+        // Each of these unchanged files contributed chunks to the source
+        // collection, was NOT in targetFiles for the clone re-scan, and must
+        // still have chunks in the target collection.
+        for (const [relPath, count] of Object.entries(unchangedSurvivors)) {
+          expect(count, `unchanged file "${relPath}" must have surviving chunks`).toBeGreaterThan(0);
+        }
+
+        // The modified file's chunks must also be present (re-embedded).
+        const modifiedCount = await countChunksForPath("src/utils/math.ts");
+        expect(modifiedCount).toBeGreaterThan(0);
+      } finally {
+        for (const projectId of [sourceId, targetId]) {
+          process.env.SOCRATICODE_PROJECT_ID = projectId;
+          try {
+            await removeProjectIndex(fixture.root);
+          } catch {
+            // ignore
+          }
+        }
+        delete process.env.SOCRATICODE_PROJECT_ID;
+        fixture.cleanup();
+      }
+    },
+    300_000,
+  );
+
+  it(
+    "falls through to full index when no sibling exists",
+    async () => {
+      const fixture = createFixtureProject("clone-no-sibling");
+      try {
+        initGitFixture(fixture);
+
+        process.env.SOCRATICODE_PROJECT_ID = `clone-fresh-${Date.now()}`;
+        const messages: string[] = [];
+        const result = await indexProject(fixture.root, (m) => messages.push(m));
+        expect(messages.some((m) => /sibling.clone/i.test(m))).toBe(false);
+        expect(result.chunksCreated).toBeGreaterThan(0);
+      } finally {
+        try {
+          await removeProjectIndex(fixture.root);
+        } catch {
+          // ignore
+        }
+        delete process.env.SOCRATICODE_PROJECT_ID;
+        fixture.cleanup();
+      }
+    },
+    300_000,
+  );
 });

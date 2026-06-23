@@ -886,6 +886,33 @@ With this enabled, collection names include the branch name (e.g. `codebase_abc1
 
 > **How it works:** `projectIdFromPath()` detects the current git branch via `git rev-parse --abbrev-ref HEAD` and appends a sanitized branch suffix (e.g. `feat/my-feature` → `feat_my-feature`) to the hash-based project ID. Detached HEAD states fall back to the branchless ID.
 
+### Fast-path indexing
+
+SocratiCode skips redundant work on re-index by consulting `git ls-files -s` to compare blob shas against previously stored project metadata. Two paths are tried before falling back to a full scan:
+
+#### 1. Same-collection skip
+
+Re-running `codebase_index` against a collection whose stored `gitBlobShas` matches the current working tree exactly skips scan + embed entirely and only refreshes the code graph. Typical cost: ~5 seconds on a 26k-file repo.
+
+#### 2. Sibling-collection clone
+
+When bootstrapping a new collection (e.g. after a branch checkout in `SOCRATICODE_BRANCH_AWARE` mode) and a sibling collection (same project path, different collection name) has overlapping `gitBlobShas`, SocratiCode:
+
+1. Scrolls all points from the sibling and upserts them into the target (`cloneCollectionPoints` — ~30 seconds for 125k points)
+2. Computes the diff (`diffGitTrees`) between the sibling's stored `gitBlobShas` and the current working tree
+3. Deletes chunks for files that no longer exist (deleted) or whose content changed (modified)
+4. Runs the normal scan + embed pipeline only on the modified + added subset
+5. Saves metadata with the current `gitBlobShas` for future fast-path lookups
+
+Cost scales linearly with actual file changes. A typical feature-branch checkout with ~10 modified files completes in ~30-45 seconds on a 26k-file repo.
+
+#### When fast paths don't apply
+
+- The project is not a git working tree (no `.git`)
+- No sibling collection exists yet for this project path
+- Sibling clone fails partway (e.g. Qdrant connectivity blip) — SocratiCode logs the failure, drops the partial target, and falls through to a normal full index
+- Active merge conflict in the working tree (files at non-zero git stages are excluded from the blob-sha map, leading to a size mismatch)
+
 ### Available tools
 
 Once connected, 21 tools are available to your AI assistant:
@@ -1230,6 +1257,7 @@ The rest of this section documents the variables themselves. Pass them using whi
 | `SOCRATICODE_LINKED_PROJECTS` | *(none)* | Comma-separated list of additional project paths to include in cross-project search. Merged with paths from `.socraticode.json`. Non-existent paths are silently skipped. |
 | `SOCRATICODE_AUTO_RESUME` | *(none)* | When set to `all`, server startup auto-resumes the file watcher plus an incremental catch-up update for **every** indexed project that has a stored path, not just the current working directory. Projects resume one at a time (sequentially) to avoid overloading the embedding provider. Skipped projects (directory no longer exists, or indexed before path tracking was added) are logged at warn level. Useful when one MCP server session should keep many canonical checkouts fresh. |
 | `SOCRATICODE_AUTO_RESUME_PROJECTS` | *(none)* | Comma-separated list of project paths to auto-resume on server startup (sequentially), e.g. `/repos/api,/repos/web`. Takes precedence over `SOCRATICODE_AUTO_RESUME`. Paths that do not exist or are not indexed are skipped with a warning. |
+| `SOCRATICODE_EMBEDDING_CACHE` | `false` | When `true`, enables a content-addressed shared embedding cache (Qdrant collection `socraticode_embedding_cache`). New collections (new branches via `SOCRATICODE_BRANCH_AWARE`, new worktrees, new linked projects) reuse vectors for files that match by `sha256(content)` + embedding model + dimensions, skipping the embedding call entirely on cache hits. Both reads and writes are gated by this flag. The cache is shared across all projects on the same Qdrant instance — embeddings are pure functions of `(content, model)`, so reuse across projects is correct, not a leak. |
 | `SOCRATICODE_LOG_LEVEL` | `info` | Log verbosity: `debug`, `info`, `warn`, `error` |
 | `SOCRATICODE_LOG_FILE` | *(none)* | Absolute path to a log file. When set, all log entries are appended to this file (a session separator is written on each server start). Useful for debugging when the MCP host doesn't surface log notifications. |
 

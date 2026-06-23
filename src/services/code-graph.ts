@@ -4,7 +4,7 @@
 import fs from "node:fs/promises";
 import { createRequire } from "node:module";
 import path from "node:path";
-import { Lang, registerDynamicLanguage } from "@ast-grep/napi";
+import { Lang, parse, registerDynamicLanguage, type SgNode } from "@ast-grep/napi";
 import { graphCollectionName, projectIdFromPath } from "../config.js";
 import { EXTRA_EXTENSIONS, getLanguageFromExtension, MAX_GRAPH_FILE_BYTES, toForwardSlash } from "../constants.js";
 import type {
@@ -15,10 +15,22 @@ import { loadPathAliases } from "./graph-aliases.js";
 import { extractImports } from "./graph-imports.js";
 import { buildCsNamespaceMap, buildGoModuleInfo, buildJvmSuffixMap, resolveImport } from "./graph-resolution.js";
 import { computeUnresolvedPct, resolveCallSites } from "./graph-symbol-resolution.js";
-import { extractSymbolsAndCalls, rawCallsToUnresolvedEdges } from "./graph-symbols.js";
+import { type ExtractedSymbols, extractSymbolsAndCalls, rawCallsToUnresolvedEdges } from "./graph-symbols.js";
 import { createIgnoreFilter, shouldIgnore } from "./ignore.js";
 import { logger } from "./logger.js";
-import { deleteGraphData, getGraphMetadata, loadGraphData, saveGraphData } from "./qdrant.js";
+import {
+  deleteGraphData,
+  getGraphMetadata,
+  loadGraphData,
+  loadGraphGitBlobShas,
+  saveGraphData,
+} from "./qdrant.js";
+import {
+  type CachedSymbolEntry,
+  lookupSymbolCacheBatch,
+  symbolCacheKey,
+  writeSymbolCacheBatch,
+} from "./symbol-cache.js";
 import {
   dropSymbolGraphCache,
   SymbolGraphCache,
@@ -142,6 +154,72 @@ export interface RebuildGraphOptions {
    * Default: `false`.
    */
   skipSymbolGraph?: boolean;
+  /**
+   * Map of repo-relative path → git blob SHA-1 for the working tree the graph
+   * is being built from. When provided, persisted on the codegraph metadata
+   * point so future runs can take the same-tree freshness fast-path via
+   * {@link isGraphFresh}.
+   */
+  gitBlobShas?: Map<string, string>;
+}
+
+/** Compare two `gitBlobShas` maps for exact equality (same keys, same values).
+ *  When they differ, logs a sample of the divergence so callers can diagnose
+ *  freshness-gate misses without re-running with extra instrumentation. */
+function shasEqual(a: Map<string, string>, b: Map<string, string>): boolean {
+  if (a.size !== b.size) {
+    logger.info("isGraphFresh: size mismatch", { stored: a.size, current: b.size });
+    return false;
+  }
+  let mismatches = 0;
+  let missingInB = 0;
+  const sampleStoredOnly: string[] = [];
+  for (const [k, v] of a) {
+    const bv = b.get(k);
+    if (bv === undefined) {
+      missingInB++;
+      if (sampleStoredOnly.length < 3) sampleStoredOnly.push(k);
+    } else if (bv !== v) {
+      mismatches++;
+    }
+  }
+  if (mismatches === 0 && missingInB === 0) return true;
+  logger.info("isGraphFresh: content mismatch", {
+    storedSize: a.size,
+    currentSize: b.size,
+    valueMismatches: mismatches,
+    keysMissingInCurrent: missingInB,
+    sampleStoredOnly,
+  });
+  return false;
+}
+
+/** Returns true when the persisted codegraph was built from the same git
+ *  tree (`gitBlobShas`) as `currentShas`. Lets callers skip a 100s+
+ *  `rebuildGraph` whenever the working tree hasn't moved since the last
+ *  successful build (e.g. same-branch reindex, sibling-clone after Part B
+ *  copies the codegraph metadata point).
+ *
+ *  Returns `false` when no codegraph metadata exists, when the persisted
+ *  shas are missing/malformed, or when any path or sha differs. */
+export async function isGraphFresh(
+  projectPath: string,
+  currentShas: Map<string, string>,
+): Promise<boolean> {
+  const projectId = projectIdFromPath(projectPath);
+  const graphCollName = graphCollectionName(projectId);
+  const stored = await loadGraphGitBlobShas(graphCollName).catch((err) => {
+    logger.warn("isGraphFresh: loadGraphGitBlobShas threw", {
+      graphCollName,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  });
+  if (stored === null) {
+    logger.info("isGraphFresh: no stored gitBlobShas (cold codegraph)", { graphCollName });
+    return false;
+  }
+  return shasEqual(stored, currentShas);
 }
 
 /** Force-rebuild, cache, and persist a graph.
@@ -193,7 +271,7 @@ async function doRebuildGraph(
 
   try {
     graphCache.delete(resolvedPath);
-    const built = await buildCodeGraph(resolvedPath, opts.extraExtensions, progress);
+    const built = await buildCodeGraph(resolvedPath, opts.extraExtensions, progress, opts.gitBlobShas);
     const graph: CodeGraph = { nodes: built.nodes, edges: built.edges };
     graphCache.set(resolvedPath, graph);
 
@@ -201,7 +279,9 @@ async function doRebuildGraph(
     progress.phase = "persisting";
     const projectId = projectIdFromPath(resolvedPath);
     const graphCollName = graphCollectionName(projectId);
-    await saveGraphData(graphCollName, resolvedPath, graph);
+    await saveGraphData(graphCollName, resolvedPath, graph, {
+      gitBlobShas: opts.gitBlobShas,
+    });
 
     // Build & persist symbol graph (resolution + sharded persistence) — unless
     // the caller asked to skip it (Phase F watcher path).
@@ -211,7 +291,12 @@ async function doRebuildGraph(
         resolveCallSites(graph, built.symbolsByFile, built.outgoingCallsByFile);
 
         progress.phase = "persisting symbols";
-        await persistSymbolGraph(projectId, resolvedPath, built.symbolsByFile, built.outgoingCallsByFile);
+        await persistSymbolGraph(
+          projectId,
+          built.symbolsByFile,
+          built.outgoingCallsByFile,
+          built.contentHashByFile,
+        );
       } catch (err) {
         logger.warn("Symbol graph build failed (file-import graph saved)", {
           projectPath: resolvedPath,
@@ -246,16 +331,22 @@ async function doRebuildGraph(
   }
 }
 
-/** Persist the symbol graph: per-file payloads + sharded indices + meta. */
+/** Persist the symbol graph: per-file payloads + sharded indices + meta.
+ *
+ * `contentHashByFile` is computed by `buildCodeGraph` during the in-memory
+ * parse pass (the source string is already in scope there), so this function
+ * never re-reads files from disk. Missing entries fall back to an empty hash
+ * — matches the prior behaviour for files whose source could not be read. */
 async function persistSymbolGraph(
   projectId: string,
-  resolvedPath: string,
   symbolsByFile: Map<string, SymbolNode[]>,
   outgoingCallsByFile: Map<string, SymbolEdge[]>,
+  contentHashByFile: Map<string, string>,
 ): Promise<void> {
   await ensureSymbolGraphCollections(projectId);
 
-  // Build per-file payloads (need source bytes for contentHash).
+  // Build per-file payloads — `contentHash` was computed during the in-memory
+  // parse pass; no third I/O pass needed here.
   const payloads: SymbolGraphFilePayload[] = [];
   let totalSymbols = 0;
   let totalEdges = 0;
@@ -266,13 +357,7 @@ async function persistSymbolGraph(
     if (firstNonModule) language = firstNonModule.language;
     else language = symbols[0]?.language ?? language;
 
-    let contentHash = "";
-    try {
-      const src = await fs.readFile(path.join(resolvedPath, relPath), "utf-8");
-      contentHash = contentHashOf(src);
-    } catch {
-      // ignore
-    }
+    const contentHash = contentHashByFile.get(relPath) ?? "";
     payloads.push({
       file: relPath, language, contentHash, symbols, outgoingCalls,
     });
@@ -320,16 +405,22 @@ async function persistSymbolGraph(
     }
   }
 
-  // Persist
+  // Persist. Shards are small in count (≤27 name + ≤256 reverse) and each
+  // upsert is an independent Qdrant RPC, so fire them in parallel —
+  // serialising them gave up several seconds of wall time on large repos.
   await saveFilePayloads(projectId, payloads);
+
+  const nameShardSaves: Promise<void>[] = [];
   for (const [shardKey, shard] of nameShards.entries()) {
     if (Object.keys(shard).length === 0) continue;
-    await saveNameShard(projectId, shardKey, shard);
+    nameShardSaves.push(saveNameShard(projectId, shardKey, shard));
   }
+  const reverseShardSaves: Promise<void>[] = [];
   for (const [bucket, shard] of reverseShards.entries()) {
     if (Object.keys(shard).length === 0) continue;
-    await saveReverseShard(projectId, bucket, shard);
+    reverseShardSaves.push(saveReverseShard(projectId, bucket, shard));
   }
+  await Promise.all([...nameShardSaves, ...reverseShardSaves]);
 
   const meta: SymbolGraphMeta = {
     projectId,
@@ -542,6 +633,33 @@ export function ensureDynamicLanguages(): void {
 
 // ── Language mapping for ast-grep ────────────────────────────────────────
 
+/** Languages where `extractImports` and `extractSymbolsAndCalls` both AST-parse
+ *  the same source with the same ast-grep `Lang`. For these we can parse once
+ *  upstream and pass the root to both extractors, halving parse work in the
+ *  hot loop. Excludes:
+ *   - Composite langs (svelte/vue) which need a separate HTML+TS parse pass.
+ *   - Regex-only langs (dart/lua) which never call ast-grep.
+ *   - CSS, where only `extractImports` runs (and only as regex over source);
+ *     parsing upstream would just throw away work. */
+const SHARED_PARSE_LANGS: ReadonlySet<Lang | string> = new Set<Lang | string>([
+  Lang.JavaScript,
+  Lang.TypeScript,
+  Lang.Tsx,
+  "python",
+  "go",
+  "rust",
+  "java",
+  "kotlin",
+  "scala",
+  "csharp",
+  "c",
+  "cpp",
+  "ruby",
+  "php",
+  "swift",
+  "bash",
+]);
+
 /** Map file extensions to ast-grep language identifiers */
 export function getAstGrepLang(ext: string): Lang | string | null {
   const map: Record<string, Lang | string> = {
@@ -625,14 +743,24 @@ export async function getGraphableFiles(
  *
  * Also extracts symbols and call sites in the same pass — returned via
  * `symbolsByFile` / `outgoingCallsByFile` and persisted by `doRebuildGraph`.
+ *
+ * `gitBlobShas` enables the global blob-sha-keyed parsed-symbol cache: any
+ * file whose `(lang, blobSha)` is already in `socraticode_symbol_cache` skips
+ * AST parsing entirely and reuses the cached extraction. Files without a
+ * blob sha (untracked / not in the map) bypass the cache and parse normally.
+ * Set `SOCRATICODE_SYMBOL_CACHE=0` to disable lookup+write entirely.
  */
 export async function buildCodeGraph(
   projectPath: string,
   extraExtensions?: Set<string>,
   progress?: GraphBuildProgress,
+  gitBlobShas?: Map<string, string>,
 ): Promise<CodeGraph & {
   symbolsByFile: Map<string, SymbolNode[]>;
   outgoingCallsByFile: Map<string, SymbolEdge[]>;
+  /** SHA-256 of each file's source, computed during the parse pass so
+   *  `persistSymbolGraph` does not have to re-read every file from disk. */
+  contentHashByFile: Map<string, string>;
 }> {
   ensureDynamicLanguages();
 
@@ -652,6 +780,45 @@ export async function buildCodeGraph(
   const edges: CodeGraphEdge[] = [];
   const symbolsByFile = new Map<string, SymbolNode[]>();
   const outgoingCallsByFile = new Map<string, SymbolEdge[]>();
+  // Hash each file's source once during the parse pass — `persistSymbolGraph`
+  // reads from this map instead of re-opening every file from disk.
+  const contentHashByFile = new Map<string, string>();
+
+  // ── Symbol cache: batch lookup for any file we have a blob sha for ────
+  // Content-addressed by `(lang, blobSha)` so identical blobs across branches
+  // and projects share extraction work. Skipped entirely when the env opt-out
+  // is set or when no blob shas are available (e.g. non-git working trees).
+  const symbolCacheEnabled =
+    process.env.SOCRATICODE_SYMBOL_CACHE !== "0" && (gitBlobShas?.size ?? 0) > 0;
+
+  // Map of relPath → cache key string so the parse loop can look up payloads
+  // without recomputing the key (which depends on `lang` resolution).
+  const cacheKeyByFile = new Map<string, string>();
+  let cacheLookup = new Map<string, CachedSymbolEntry>();
+  if (symbolCacheEnabled && gitBlobShas) {
+    const lookupEntries: Array<{ lang: string; blobSha: string }> = [];
+    for (const relPath of files) {
+      const blobSha = gitBlobShas.get(relPath);
+      if (!blobSha) continue;
+      const ext = path.extname(relPath).toLowerCase();
+      const lang = getAstGrepLang(ext);
+      if (!lang) continue;
+      const langKey = String(lang);
+      const key = symbolCacheKey(langKey, blobSha);
+      cacheKeyByFile.set(relPath, key);
+      lookupEntries.push({ lang: langKey, blobSha });
+    }
+    if (lookupEntries.length > 0) {
+      cacheLookup = await lookupSymbolCacheBatch(lookupEntries);
+      logger.info("Symbol cache batch lookup", {
+        candidates: lookupEntries.length,
+        hits: cacheLookup.size,
+        hitRatePct: ((cacheLookup.size / lookupEntries.length) * 100).toFixed(1),
+      });
+    }
+  }
+  // Queued cache writes — flushed at the end of the build, best-effort.
+  const cacheWrites: CachedSymbolEntry[] = [];
 
   // Build a suffix lookup map for JVM multi-module projects (Java/Kotlin/Scala).
   // This resolves FQNs like com.example.Foo when the class lives under a nested
@@ -704,16 +871,7 @@ export async function buildCodeGraph(
     const language = getLanguageFromExtension(ext);
     const absolutePath = path.join(resolvedPath, relPath);
 
-    let source: string;
-    try {
-      const stat = await fs.stat(absolutePath);
-      if (stat.size > MAX_GRAPH_FILE_BYTES) continue; // Skip large files
-      source = await fs.readFile(absolutePath, "utf-8");
-    } catch {
-      continue;
-    }
-
-    // Create node for this file
+    // Create node for this file (always — both cache-hit and miss paths need it)
     if (!nodesMap.has(relPath)) {
       nodesMap.set(relPath, {
         filePath: absolutePath,
@@ -727,12 +885,94 @@ export async function buildCodeGraph(
     const node = nodesMap.get(relPath);
     if (!node) continue;
 
+    // ── Cache-hit fast path ────────────────────────────────────────────
+    // If we have a `(lang, blobSha)` hit, we can skip both file I/O and
+    // ast-grep parse: the cached payload already contains symbols, raw
+    // calls, and imports computed from this exact blob. We still recompute
+    // the contentHash from the cached imports' source — but the cache key
+    // is the blob SHA itself, which IS the content hash for git-tracked
+    // files, so we reuse it directly without reading the file.
+    const cacheKey = cacheKeyByFile.get(relPath);
+    const cached = cacheKey ? cacheLookup.get(cacheKey) : undefined;
+    if (cached) {
+      // gitBlobShas is guaranteed defined here (we only seeded cacheKeyByFile
+      // when it was populated) — but TypeScript can't prove it, so use `?.`.
+      const blobSha = gitBlobShas?.get(relPath);
+      if (blobSha) contentHashByFile.set(relPath, blobSha);
+      symbolsByFile.set(relPath, cached.symbols);
+      outgoingCallsByFile.set(relPath, rawCallsToUnresolvedEdges(cached.rawCalls));
+
+      for (const imp of cached.imports) {
+        node.imports.push(imp.moduleSpecifier);
+        const resolutionLanguage = imp.isCssImport ? "css" : language;
+        const resolved = resolveImport(imp.moduleSpecifier, absolutePath, resolvedPath, fileSet, resolutionLanguage, aliases, jvmSuffixMap, csNamespaceMap);
+        if (resolved) {
+          node.dependencies.push(resolved);
+          if (!nodesMap.has(resolved)) {
+            nodesMap.set(resolved, {
+              filePath: path.join(resolvedPath, resolved),
+              relativePath: resolved,
+              imports: [],
+              exports: [],
+              dependencies: [],
+              dependents: [],
+            });
+          }
+          nodesMap.get(resolved)?.dependents.push(relPath);
+          edges.push({
+            source: relPath,
+            target: resolved,
+            type: imp.isDynamic ? "dynamic-import" : "import",
+          });
+        }
+      }
+      if (progress) progress.filesProcessed++;
+      continue;
+    }
+
+    let source: string;
+    try {
+      const stat = await fs.stat(absolutePath);
+      if (stat.size > MAX_GRAPH_FILE_BYTES) continue; // Skip large files
+      source = await fs.readFile(absolutePath, "utf-8");
+    } catch {
+      continue;
+    }
+
+    // Parse once per file when both extractors will use the same ast-grep
+    // Lang. `extractImports` and `extractSymbolsAndCalls` accept the root and
+    // skip their own internal parse. Composite (svelte/vue) and regex-only
+    // (dart/lua) langs leave this `undefined` and let each extractor handle
+    // its own parsing path.
+    let parsedRoot: SgNode | undefined;
+    if (SHARED_PARSE_LANGS.has(lang)) {
+      try {
+        parsedRoot = parse(lang, source).root();
+      } catch (err) {
+        // Fall through to extractor-internal parsing on failure — preserves
+        // the original error-handling path (each extractor logs + recovers).
+        logger.debug("Upstream parse failed, falling back to per-extractor parse", {
+          file: relPath,
+          lang: String(lang),
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
     // Extract imports using ast-grep
-    const importInfos = extractImports(source, lang, ext);
+    const importInfos = extractImports(source, lang, ext, parsedRoot);
+
+    // Hash the source once now — `persistSymbolGraph` consumes this map so
+    // it can skip re-reading every file just to compute SHA-256.
+    contentHashByFile.set(relPath, contentHashOf(source));
 
     // Extract symbols & raw call sites in the same pass
+    let extractedRawCalls: ExtractedSymbols["rawCalls"] | null = null;
+    let extractedSymbols: SymbolNode[] | null = null;
     try {
-      const extracted = extractSymbolsAndCalls(source, lang, ext, relPath);
+      const extracted = extractSymbolsAndCalls(source, lang, ext, relPath, parsedRoot);
+      extractedSymbols = extracted.symbols;
+      extractedRawCalls = extracted.rawCalls;
       symbolsByFile.set(relPath, extracted.symbols);
       outgoingCallsByFile.set(relPath, rawCallsToUnresolvedEdges(extracted.rawCalls));
     } catch (err) {
@@ -740,6 +980,23 @@ export async function buildCodeGraph(
         file: relPath,
         error: err instanceof Error ? err.message : String(err),
       });
+    }
+
+    // Queue this miss for batch cache write at end of build. Only enqueue
+    // when we have a blob sha AND symbol extraction succeeded — otherwise
+    // we'd cache a partial result that future hits would replay.
+    if (symbolCacheEnabled && cacheKey && extractedSymbols !== null && extractedRawCalls !== null) {
+      const blobSha = gitBlobShas?.get(relPath);
+      const langKey = String(lang);
+      if (blobSha) {
+        cacheWrites.push({
+          lang: langKey,
+          blobSha,
+          symbols: extractedSymbols,
+          rawCalls: extractedRawCalls,
+          imports: importInfos,
+        });
+      }
     }
 
     for (const imp of importInfos) {
@@ -776,12 +1033,26 @@ export async function buildCodeGraph(
     if (progress) progress.filesProcessed++;
   }
 
-  logger.info("Code graph built", { nodes: nodesMap.size, edges: edges.length });
+  logger.info("Code graph built", {
+    nodes: nodesMap.size,
+    edges: edges.length,
+    cacheHits: cacheLookup.size,
+    cacheWrites: cacheWrites.length,
+  });
+
+  // Flush queued cache writes. Awaited so any test/benchmark that immediately
+  // re-runs sees a populated cache; the upsert itself uses `wait: false` so
+  // the round trip does not block on Qdrant durably persisting the points.
+  // Best-effort: never throws (failures are logged and swallowed inside).
+  if (cacheWrites.length > 0) {
+    await writeSymbolCacheBatch(cacheWrites);
+  }
 
   return {
     nodes: Array.from(nodesMap.values()),
     edges,
     symbolsByFile,
     outgoingCallsByFile,
+    contentHashByFile,
   };
 }

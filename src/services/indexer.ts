@@ -6,7 +6,14 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 import { type Lang, parse } from "@ast-grep/napi";
 import { glob } from "glob";
-import { collectionName, projectIdFromPath } from "../config.js";
+import {
+  collectionName,
+  graphCollectionName,
+  projectIdFromPath,
+  symgraphFileCollectionName,
+  symgraphIndexCollectionName,
+  symgraphMetaCollectionName,
+} from "../config.js";
 import {
   CHUNK_OVERLAP,
   CHUNK_SIZE,
@@ -19,23 +26,39 @@ import {
   SUPPORTED_EXTENSIONS
 } from "../constants.js";
 import type { FileChunk } from "../types.js";
-import { ensureDynamicLanguages, getAstGrepLang, rebuildGraph, removeGraph } from "./code-graph.js";
+import {
+  ensureDynamicLanguages,
+  getAstGrepLang,
+  invalidateGraphCache,
+  isGraphFresh,
+  rebuildGraph,
+  removeGraph,
+} from "./code-graph.js";
 import { ensureArtifactsIndexed, loadConfig, removeAllArtifacts } from "./context-artifacts.js";
+import { type CachedEmbedding, lookupEmbeddings, putEmbedding } from "./embedding-cache.js";
 import { generateEmbeddings, prepareDocumentText } from "./embeddings.js";
+import { diffGitTrees, getGitBlobShas } from "./git-tree.js";
 import { createIgnoreFilter, shouldIgnore } from "./ignore.js";
 import { acquireProjectLock, releaseProjectLock } from "./lock.js";
 import { logger } from "./logger.js";
 import {
+  cloneCollectionPoints,
+  cloneGraphMetadataPoint,
   deleteCollection,
   deleteFileChunks,
+  deleteFileChunksBatch,
   deleteProjectMetadata,
   ensureCollection,
+  findSiblingMetadata,
   getCollectionInfo,
   getProjectMetadata,
+  loadProjectGitBlobShas,
   loadProjectHashes,
+  replaceCollectionFromSibling,
   saveProjectMetadata,
   upsertPreEmbeddedChunks,
 } from "./qdrant.js";
+import { dropSymbolGraphCache } from "./symbol-graph-cache.js";
 import { updateChangedFilesSymbolGraph } from "./symbol-graph-incremental.js";
 import { loadSymbolGraphMeta } from "./symbol-graph-store.js";
 
@@ -225,6 +248,19 @@ function detectCommonPrefix(hashes: Map<string, string>): string | null {
 /** Hash file content for change detection */
 export function hashContent(content: string): string {
   return createHash("sha256").update(content).digest("hex").slice(0, 16);
+}
+
+/**
+ * Compares two gitBlobShas maps for exact equality (same paths, same shas).
+ * Cheap O(n) check, n = file count. Used by the same-collection fast-skip
+ * path to detect when a branch is unchanged since its last full index.
+ */
+function gitBlobShasEqual(a: Map<string, string>, b: Map<string, string>): boolean {
+  if (a.size !== b.size) return false;
+  for (const [filePath, sha] of a) {
+    if (b.get(filePath) !== sha) return false;
+  }
+  return true;
 }
 
 /** Generate a stable chunk ID as a valid UUID (required by Qdrant) */
@@ -642,102 +678,86 @@ export async function getIndexableFiles(
   });
 }
 
-/** Full index of a project directory */
-export async function indexProject(
-  projectPath: string,
-  onProgress?: (message: string) => void,
-  extraExtensions?: Set<string>,
+/**
+ * Internal options bag for {@link scanAndIndexFiles}. Captures everything the
+ * scan + embed pipeline closes over; deliberately scoped to the minimum the
+ * extracted body needs so future call sites (e.g. the sibling-clone fast path)
+ * can drive the helper with a path subset without touching `indexProject`'s
+ * outer setup.
+ */
+interface ScanAndIndexOptions {
+  resolvedPath: string;
+  collection: string;
+  /** Mutated in-place: scan populates new entries, stale entries get removed. */
+  hashes: Map<string, string>;
+  /** Relative paths to scan + embed. Caller decides full set vs. subset. */
+  targetFiles: string[];
+  progress: IndexingProgress;
+  onProgress?: (message: string) => void;
+  hasExistingData: boolean;
+  /** Set of files currently present + indexable in the working tree. Used by
+   *  the cleanup loop to identify chunks for files genuinely removed from
+   *  disk. Defaults to `new Set(targetFiles)` for backward compatibility with
+   *  the full-project flow where targetFiles === all indexable files.
+   *  The sibling-clone path passes the FULL set so that paths in `hashes`
+   *  (seeded with diff.unchanged) aren't misidentified as deleted. */
+  currentFileSet?: Set<string>;
+}
+
+/**
+ * Pure refactor of the scan + embed pipeline previously inlined in
+ * {@link indexProject}. Behavior is identical: the function consumes
+ * `targetFiles`, scans + chunks, deletes stale chunks for changed/removed
+ * files, embeds + upserts in batches, and persists in-progress checkpoints
+ * along the way. Cancellation between batches still records `lastCompleted`
+ * and returns `cancelled: true` so the caller can short-circuit cleanly.
+ */
+async function scanAndIndexFiles(
+  opts: ScanAndIndexOptions,
 ): Promise<{ filesIndexed: number; chunksCreated: number; cancelled: boolean }> {
-  // Register dynamic AST grammars for AST-aware chunking
-  ensureDynamicLanguages();
-
-  const resolvedPath = path.resolve(projectPath);
-
-  // Cross-process lock: prevent two MCP instances from indexing the same project
-  const lockAcquired = await acquireProjectLock(resolvedPath, "index");
-  if (!lockAcquired) {
-    const msg = "Another process is already indexing this project, skipping";
-    logger.info(msg, { projectPath: resolvedPath });
-    onProgress?.(msg);
-    return { filesIndexed: 0, chunksCreated: 0, cancelled: false };
-  }
-
-  const progress: IndexingProgress = {
-    type: "full-index",
-    startedAt: Date.now(),
-    filesTotal: 0,
-    filesProcessed: 0,
-    phase: "setting up",
-  };
-  indexingInProgress.set(resolvedPath, progress);
-
-  try {
-  const projectId = projectIdFromPath(resolvedPath);
-  const collection = collectionName(projectId);
-  const hashes = await getProjectHashes(projectId, collection, resolvedPath);
-
-  // Smart re-index: check if collection already has data.
-  // getCollectionInfo now throws on transient errors (instead of returning null),
-  // so a Qdrant blip will abort the operation rather than trigger a false clean-start.
-  let existingInfo: { pointsCount: number; status: string } | null;
-  try {
-    existingInfo = await getCollectionInfo(collection);
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    logger.error("Cannot determine collection state — aborting indexing to protect existing data", {
-      collection,
-      error: msg,
-    });
-    throw new Error(`Failed to check collection state for ${collection}: ${msg}. Aborting to avoid accidental data loss.`);
-  }
-  const hasExistingData = existingInfo !== null && existingInfo.pointsCount > 0;
-
-  // ensureCollection is idempotent — creates if absent, no-op if exists.
-  // IMPORTANT: We NEVER delete a collection here. Only removeProjectIndex
-  // (called by the codebase_remove tool) is allowed to delete collections.
-  await ensureCollection(collection);
-
-  if (hasExistingData) {
-    if (hashes.size > 0) {
-      onProgress?.(`Existing index found (${existingInfo?.pointsCount} chunks, ${hashes.size} file hashes), resuming...`);
-    } else {
-      // Collection has data but no hashes — likely a crash before metadata was saved,
-      // or hashes were lost. Re-embed everything but keep existing chunks to avoid
-      // destroying a partially completed index.
-      onProgress?.(`Existing index found (${existingInfo?.pointsCount} chunks, no file hashes). Re-indexing all files (existing chunks preserved)...`);
-    }
-  } else {
-    // Collection is empty or was just created — fresh start, clear any stale in-memory hashes
-    if (existingInfo === null) {
-      onProgress?.(`Setting up collection ${collection} (new)...`);
-      logger.info("Collection did not exist, created fresh", { collection });
-    } else {
-      onProgress?.(`Setting up collection ${collection} (empty, reusing)...`);
-      logger.info("Collection exists but is empty, reusing", { collection, pointsCount: existingInfo.pointsCount });
-    }
-    hashes.clear();
-  }
+  const { resolvedPath, collection, hashes, targetFiles: files, progress, onProgress, hasExistingData } = opts;
+  // `currentFileSet` represents files present on disk right now. In the
+  // full-project flow this equals `targetFiles`, so the default preserves the
+  // pre-refactor behavior. In the sibling-clone flow the caller passes the
+  // FULL set of indexable files (not just modified+added) so unchanged files
+  // — whose hashes were seeded from the cloned sibling — survive cleanup.
+  const currentFileSet = opts.currentFileSet ?? new Set(files);
 
   // ── Phase 1: Scan and chunk files ──
-  progress.phase = "scanning files";
-  const files = await getIndexableFiles(resolvedPath, extraExtensions);
-  progress.filesTotal = files.length;
-  onProgress?.(`Found ${files.length} indexable files`);
-
   interface ChunkedFile {
     relativePath: string;
     absolutePath: string;
     contentHash: string;
     chunks: FileChunk[];
+    // When non-null, vectors came from the shared embedding cache and the embed
+    // phase can skip the Ollama call for these chunks. The array length matches
+    // chunks.length and each vector aligns positionally with its chunk.
+    cachedVectors: number[][] | null;
   }
 
+  const cacheEnabled = process.env.SOCRATICODE_EMBEDDING_CACHE === "true";
   const chunkedFiles: ChunkedFile[] = [];
   let skippedCount = 0;
+  let cacheHits = 0;
+
+  // Per-file scan candidate: a file that survived stat+read+skip-by-hash and
+  // is ready for cache lookup or fresh chunking. `null` means the file was
+  // skipped (oversized, unchanged, or read error) and should not be processed
+  // further in this batch.
+  type ScanCandidate = {
+    relativePath: string;
+    absolutePath: string;
+    content: string;
+    contentHash: string;
+  };
 
   for (let i = 0; i < files.length; i += FILE_SCAN_BATCH) {
     const batch = files.slice(i, i + FILE_SCAN_BATCH);
-    const results = await Promise.all(
-      batch.map(async (relativePath): Promise<ChunkedFile | null> => {
+
+    // Phase 1: parallel stat + read + hash. Skip oversized, unchanged, and
+    // read-error files here so they never reach the bulk cache lookup.
+    const scanned: Array<ScanCandidate | null> = await Promise.all(
+      batch.map(async (relativePath): Promise<ScanCandidate | null> => {
         const absolutePath = path.join(resolvedPath, relativePath);
         try {
           const stat = await fsp.stat(absolutePath);
@@ -753,23 +773,71 @@ export async function indexProject(
             return null;
           }
 
-          const chunks = chunkFileContent(absolutePath, relativePath, content);
-          return { relativePath, absolutePath, contentHash, chunks };
+          return { relativePath, absolutePath, content, contentHash };
         } catch {
           return null;
         }
       }),
     );
 
-    for (const r of results) {
-      if (r) chunkedFiles.push(r);
+    const candidates: ScanCandidate[] = [];
+    for (const s of scanned) {
+      if (s) candidates.push(s);
       else skippedCount++;
     }
+
+    // Phase 2: one bulk cache lookup for the whole batch. This collapses what
+    // used to be FILE_SCAN_BATCH separate Qdrant retrieve round-trips into a
+    // single retrieve call per outer batch.
+    let cachedByHash: Map<string, CachedEmbedding> = new Map();
+    if (cacheEnabled && candidates.length > 0) {
+      cachedByHash = await lookupEmbeddings(candidates.map((c) => c.contentHash));
+    }
+
+    // Phase 3: assemble ChunkedFile entries. On a cache hit, reuse cached
+    // chunks + vectors so chunk IDs and line ranges stay stable across
+    // collections. On a miss, fall through to fresh chunking; the embed phase
+    // will handle the Ollama call.
+    for (const { relativePath, absolutePath, content, contentHash } of candidates) {
+      const cached = cachedByHash.get(contentHash);
+      if (cached) {
+        chunkedFiles.push({
+          relativePath,
+          absolutePath,
+          contentHash,
+          chunks: cached.chunks,
+          cachedVectors: cached.vectors,
+        });
+        cacheHits++;
+        continue;
+      }
+      const chunks = chunkFileContent(absolutePath, relativePath, content);
+      chunkedFiles.push({ relativePath, absolutePath, contentHash, chunks, cachedVectors: null });
+    }
+
     progress.filesProcessed = Math.min(i + batch.length, files.length);
+  }
+
+  if (cacheEnabled && cacheHits > 0) {
+    onProgress?.(`Embedding cache: ${cacheHits}/${chunkedFiles.length} files reused from shared cache`);
   }
 
   if (hasExistingData) {
     onProgress?.(`${chunkedFiles.length} files changed, ${skippedCount} unchanged/skipped`);
+
+    // Defensive guard: if the caller passes (or defaults to) an empty
+    // currentFileSet alongside non-empty hashes, the cleanup loop below would
+    // delete chunks for every previously-indexed file — catastrophic data
+    // loss. The full-project flow's default (`new Set(targetFiles)`) makes
+    // this only possible when targetFiles is empty AND hashes were seeded
+    // upstream (e.g. a future caller forgetting to pass currentFileSet on
+    // the sibling-clone path). Throw rather than silently delete.
+    if (currentFileSet.size === 0 && hashes.size > 0) {
+      throw new Error(
+        `scanAndIndexFiles: refusing to run cleanup with empty currentFileSet ` +
+        `but hashes.size=${hashes.size} (would delete every prior chunk).`,
+      );
+    }
 
     // Delete old chunks for changed files
     progress.phase = "cleaning stale chunks";
@@ -779,8 +847,9 @@ export async function indexProject(
       }
     }
 
-    // Handle deleted files
-    const currentFileSet = new Set(files);
+    // Handle deleted files: any previously-indexed path that is NOT in the
+    // current working-tree set is stale and must be evicted from both the
+    // collection and the in-memory hash map.
     for (const [filePath] of hashes) {
       if (!currentFileSet.has(filePath)) {
         await deleteFileChunks(collection, filePath);
@@ -823,11 +892,28 @@ export async function indexProject(
     const fileBatch = chunkedFiles.slice(batchIdx, batchIdx + INDEX_BATCH_SIZE);
     const batchNum = Math.floor(batchIdx / INDEX_BATCH_SIZE) + 1;
 
-    // Collect chunks for this file batch
-    const batchChunkData: Array<{ chunk: FileChunk; contentHash: string; absolutePath: string }> = [];
-    for (const file of fileBatch) {
-      for (const chunk of file.chunks) {
-        batchChunkData.push({ chunk, contentHash: file.contentHash, absolutePath: file.absolutePath });
+    // Collect chunks for this file batch. fileIdx records which file in
+    // fileBatch each chunk belongs to so we can group freshly-embedded
+    // vectors back by file when populating the shared cache below.
+    const batchChunkData: Array<{
+      chunk: FileChunk;
+      contentHash: string;
+      absolutePath: string;
+      cachedVector: number[] | null;
+      fileIdx: number;
+    }> = [];
+    for (let fIdx = 0; fIdx < fileBatch.length; fIdx++) {
+      const file = fileBatch[fIdx];
+      for (let cIdx = 0; cIdx < file.chunks.length; cIdx++) {
+        const chunk = file.chunks[cIdx];
+        const cachedVector = file.cachedVectors ? file.cachedVectors[cIdx] : null;
+        batchChunkData.push({
+          chunk,
+          contentHash: file.contentHash,
+          absolutePath: file.absolutePath,
+          cachedVector,
+          fileIdx: fIdx,
+        });
       }
     }
 
@@ -836,22 +922,59 @@ export async function indexProject(
       continue;
     }
 
-    // Generate embeddings for this batch
-    progress.phase = `generating embeddings (batch ${batchNum}/${totalBatches})`;
-    onProgress?.(`Batch ${batchNum}/${totalBatches}: generating embeddings for ${batchChunkData.length} chunks (${fileBatch.length} files)...`);
+    // BM25 sparse text is needed for every chunk (cached or fresh) to populate
+    // Qdrant's sparse index alongside the dense vector.
+    const batchBm25Texts = batchChunkData.map((c) =>
+      prepareDocumentText(c.chunk.content, c.chunk.relativePath),
+    );
 
-    const batchTexts = batchChunkData.map((c) => prepareDocumentText(c.chunk.content, c.chunk.relativePath));
-    const batchEmbeddings = await generateEmbeddings(batchTexts, (processed) => {
-      progress.chunksProcessed = globalChunksProcessed + processed;
-    });
+    // Embed only the cache-miss chunks; cache-hit chunks short-circuit Ollama.
+    const uncachedIndices: number[] = [];
+    const uncachedTexts: string[] = [];
+    for (let i = 0; i < batchChunkData.length; i++) {
+      if (batchChunkData[i].cachedVector === null) {
+        uncachedIndices.push(i);
+        uncachedTexts.push(batchBm25Texts[i]);
+      }
+    }
+
+    progress.phase = `generating embeddings (batch ${batchNum}/${totalBatches})`;
+    if (uncachedTexts.length === 0) {
+      onProgress?.(`Batch ${batchNum}/${totalBatches}: ${batchChunkData.length} chunks (${fileBatch.length} files) all served from cache, skipping Ollama...`);
+    } else if (uncachedTexts.length < batchChunkData.length) {
+      const skipped = batchChunkData.length - uncachedTexts.length;
+      onProgress?.(`Batch ${batchNum}/${totalBatches}: generating embeddings for ${uncachedTexts.length} chunks (${skipped} cached) across ${fileBatch.length} files...`);
+    } else {
+      onProgress?.(`Batch ${batchNum}/${totalBatches}: generating embeddings for ${batchChunkData.length} chunks (${fileBatch.length} files)...`);
+    }
+
+    let newEmbeddings: number[][] = [];
+    if (uncachedTexts.length > 0) {
+      newEmbeddings = await generateEmbeddings(uncachedTexts, (processed) => {
+        progress.chunksProcessed = globalChunksProcessed + processed;
+      });
+    }
+
+    // Stitch cached + freshly-embedded vectors back into the chunk order.
+    const batchVectors: number[][] = new Array(batchChunkData.length);
+    let uncachedPos = 0;
+    for (let i = 0; i < batchChunkData.length; i++) {
+      const c = batchChunkData[i];
+      if (c.cachedVector !== null) {
+        batchVectors[i] = c.cachedVector;
+      } else {
+        batchVectors[i] = newEmbeddings[uncachedPos];
+        uncachedPos++;
+      }
+    }
     globalChunksProcessed += batchChunkData.length;
 
     // Upsert this batch to Qdrant
     progress.phase = `storing index (batch ${batchNum}/${totalBatches})`;
     const batchPoints = batchChunkData.map((c, i) => ({
       id: c.chunk.id,
-      vector: batchEmbeddings[i],
-      bm25Text: batchTexts[i],
+      vector: batchVectors[i],
+      bm25Text: batchBm25Texts[i],
       payload: {
         filePath: c.chunk.filePath,
         relativePath: c.chunk.relativePath,
@@ -876,11 +999,41 @@ export async function indexProject(
     });
 
     if (pointsSkipped > 0 && pointsSkipped === batchPoints.length) {
-      // Every single point in the batch was skipped — the collection likely disappeared
+      // Every point in the batch was rejected. Re-check existence so the error
+      // distinguishes "actually deleted" from "transiently rejecting writes"
+      // (e.g. mid-recover, concurrent index op, BM25 inference engine init).
+      // Per-point error details were already logged via logger.warn in
+      // upsertPreEmbeddedChunks's per-point fallback.
+      const stillExists = (await getCollectionInfo(collection).catch(() => null)) != null;
       throw new Error(
         `Qdrant upsert: all ${batchPoints.length} points in batch ${batchNum}/${totalBatches} ` +
-        `were skipped (collection=${collection}). The collection may have been deleted externally.`
+        `were rejected (collection=${collection}, exists=${stillExists}). ` +
+        `${stillExists ? "Collection is alive but rejected every point — likely a transient write window or schema mismatch." : "Collection was deleted externally."} ` +
+        `Underlying per-point errors were logged via logger.warn.`
       );
+    }
+
+    // Populate the shared embedding cache with vectors we just computed so
+    // future indexes of files with identical content hashes can skip Ollama.
+    // Only files that came in as cache misses get written back.
+    if (cacheEnabled) {
+      const vectorsByFileIdx = new Map<number, number[][]>();
+      for (let i = 0; i < batchChunkData.length; i++) {
+        const fIdx = batchChunkData[i].fileIdx;
+        let bucket = vectorsByFileIdx.get(fIdx);
+        if (!bucket) {
+          bucket = [];
+          vectorsByFileIdx.set(fIdx, bucket);
+        }
+        bucket.push(batchVectors[i]);
+      }
+      for (let fIdx = 0; fIdx < fileBatch.length; fIdx++) {
+        const file = fileBatch[fIdx];
+        if (file.cachedVectors !== null) continue;
+        const fileVectors = vectorsByFileIdx.get(fIdx);
+        if (!fileVectors || fileVectors.length !== file.chunks.length) continue;
+        await putEmbedding(file.contentHash, { chunks: file.chunks, vectors: fileVectors });
+      }
     }
 
     // Update hashes for this batch's files
@@ -896,24 +1049,673 @@ export async function indexProject(
     onProgress?.(`Batch ${batchNum}/${totalBatches} checkpointed (${totalChunksCreated} chunks so far)`);
   }
 
-  const filesIndexed = files.length;
-  const chunksCreated = totalChunksCreated;
+  return { filesIndexed: files.length, chunksCreated: totalChunksCreated, cancelled: false };
+}
 
-  // Final metadata save
-  progress.phase = "saving metadata";
-  await saveProjectMetadata(collection, resolvedPath, filesIndexed, hashes.size, hashes, "completed");
+/** Full index of a project directory */
+export async function indexProject(
+  projectPath: string,
+  onProgress?: (message: string) => void,
+  extraExtensions?: Set<string>,
+): Promise<{ filesIndexed: number; chunksCreated: number; cancelled: boolean }> {
+  // Register dynamic AST grammars for AST-aware chunking
+  ensureDynamicLanguages();
 
-  // Auto-build code graph
-  progress.phase = "building code graph";
-  onProgress?.("Building code dependency graph...");
-  try {
-    const graph = await rebuildGraph(resolvedPath);
-    onProgress?.(`Code graph built: ${graph.nodes.length} files, ${graph.edges.length} edges`);
-  } catch (graphErr) {
-    const graphMsg = graphErr instanceof Error ? graphErr.message : String(graphErr);
-    logger.warn("Code graph build failed (non-fatal)", { projectPath: resolvedPath, error: graphMsg });
-    onProgress?.(`Code graph build failed (non-fatal): ${graphMsg}`);
+  const resolvedPath = path.resolve(projectPath);
+
+  // Cross-process lock: prevent two MCP instances from indexing the same project
+  const lockAcquired = await acquireProjectLock(resolvedPath, "index");
+  if (!lockAcquired) {
+    const msg = "Another process is already indexing this project, skipping";
+    logger.info(msg, { projectPath: resolvedPath });
+    onProgress?.(msg);
+    return { filesIndexed: 0, chunksCreated: 0, cancelled: false };
   }
+
+  const progress: IndexingProgress = {
+    type: "full-index",
+    startedAt: Date.now(),
+    filesTotal: 0,
+    filesProcessed: 0,
+    phase: "setting up",
+  };
+  indexingInProgress.set(resolvedPath, progress);
+
+  try {
+  const projectId = projectIdFromPath(resolvedPath);
+  const collection = collectionName(projectId);
+  const hashes = await getProjectHashes(projectId, collection, resolvedPath);
+
+  // Snapshot the current git tree once per run. Null when the directory is
+  // not a git checkout — in that case we simply don't persist git shas and
+  // future fast-path detection silently degrades to a normal scan.
+  const currentGitBlobShas = await getGitBlobShas(resolvedPath);
+
+  // Set to true once the sibling-clone path has produced a usable codegraph
+  // (clone, incremental rebuild, or full rebuild). The normal-flow fall-back
+  // checks this so a late failure inside sibling-clone (e.g. saveProjectMetadata
+  // throws after the small-diff path already rebuilt the graph) doesn't
+  // trigger a redundant ~50s buildCodeGraph in the 4-G concurrent IIFE.
+  let graphAlreadyBuilt = false;
+
+  // Smart re-index: check if collection already has data.
+  // getCollectionInfo now throws on transient errors (instead of returning null),
+  // so a Qdrant blip will abort the operation rather than trigger a false clean-start.
+  let existingInfo: { pointsCount: number; status: string } | null;
+  try {
+    existingInfo = await getCollectionInfo(collection);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error("Cannot determine collection state — aborting indexing to protect existing data", {
+      collection,
+      error: msg,
+    });
+    throw new Error(`Failed to check collection state for ${collection}: ${msg}. Aborting to avoid accidental data loss.`);
+  }
+  const hasExistingData = existingInfo !== null && existingInfo.pointsCount > 0;
+
+  // NOTE: ensureCollection(collection) is intentionally deferred to AFTER the
+  // sibling-clone gate below. The snapshot+recover clone primitive
+  // auto-creates the target collection from the source snapshot's schema —
+  // it requires the target NOT to exist. If we ensureCollection upfront we'd
+  // pre-create an empty target and recover would fail. On the normal-flow
+  // path (no sibling clone taken, or clone failed and we fell through) we
+  // call ensureCollection there.
+
+  // ── Fast-path: same-collection skip ──
+  // If this collection has prior metadata with gitBlobShas matching the
+  // current working tree exactly, the index is already up to date — skip
+  // scan + embed and just refresh the graph. Saves the bulk of the work on
+  // repeat invocations against an unchanged branch.
+  //
+  // Conditions for taking the fast path:
+  //   1. Project is a git repo (currentGitBlobShas is non-null).
+  //   2. Collection already has data + saved gitBlobShas + saved hashes.
+  //   3. Saved gitBlobShas matches current working-tree gitBlobShas exactly.
+  //
+  // Edge cases that intentionally fall through to the normal scan:
+  //   - First-time index (hasExistingData = false).
+  //   - Project not a git repo (currentGitBlobShas = null).
+  //   - Old collection saved before gitBlobShas was tracked (previous = null).
+  //   - Any file changed (gitBlobShasEqual returns false).
+  //   - Existing data but no in-memory hashes (cannot persist a complete map).
+  if (hasExistingData && currentGitBlobShas !== null && hashes.size > 0) {
+    const previousGitBlobShas = await loadProjectGitBlobShas(collection).catch(
+      () => null,
+    );
+    if (
+      previousGitBlobShas !== null &&
+      gitBlobShasEqual(previousGitBlobShas, currentGitBlobShas)
+    ) {
+      onProgress?.(
+        `Fast-path: branch unchanged since last index (${currentGitBlobShas.size} files). Skipping scan + embed.`,
+      );
+      logger.info("Same-collection fast-skip taken", {
+        collection,
+        files: currentGitBlobShas.size,
+      });
+
+      progress.phase = "building code graph";
+      const graphFresh = await isGraphFresh(resolvedPath, currentGitBlobShas).catch(() => false);
+      if (graphFresh) {
+        onProgress?.(`Code graph fresh — skipping rebuild.`);
+        logger.info("Code graph fresh, skipping rebuild", { resolvedPath });
+      } else {
+        try {
+          const graph = await rebuildGraph(resolvedPath, {
+            gitBlobShas: currentGitBlobShas,
+          });
+          onProgress?.(
+            `Code graph: ${graph.nodes.length} files, ${graph.edges.length} edges`,
+          );
+        } catch (graphErr) {
+          const graphMsg =
+            graphErr instanceof Error ? graphErr.message : String(graphErr);
+          logger.warn("Code graph build failed during fast-skip (non-fatal)", {
+            projectPath: resolvedPath,
+            error: graphMsg,
+          });
+        }
+      }
+
+      progress.phase = "saving metadata";
+      await saveProjectMetadata(
+        collection,
+        resolvedPath,
+        hashes.size,
+        hashes.size,
+        hashes,
+        "completed",
+        { gitBlobShas: currentGitBlobShas },
+      );
+
+      onProgress?.(`Indexing complete (fast-path): ${hashes.size} files, 0 chunks`);
+      lastCompleted.set(resolvedPath, {
+        type: "full-index",
+        completedAt: Date.now(),
+        durationMs: Date.now() - progress.startedAt,
+        filesProcessed: hashes.size,
+        chunksCreated: 0,
+      });
+      return { filesIndexed: hashes.size, chunksCreated: 0, cancelled: false };
+    }
+  }
+
+  // ── Fast-path: sibling-clone ──
+  // Bootstrapping a new (or empty) collection? Look for a sibling collection
+  // whose gitBlobShas overlap with the current working tree. If found:
+  //   1. Clone all of sibling's points into the target (~30s for 125k chunks).
+  //   2. Diff the trees (unchanged / modified / added / deleted).
+  //   3. Delete chunks for modified + deleted files (modified files re-chunk
+  //      below; explicit delete prevents stale chunks at line offsets that
+  //      no longer exist after edits).
+  //   4. Run scan + embed only on (modified + added) — most files are reused.
+  //   5. Save metadata with current gitBlobShas so future runs hit fast paths.
+  //
+  // On any error during clone, we fall through to the normal full-index path
+  // below. The collection we partially populated will be overwritten by the
+  // upsert calls in scanAndIndexFiles.
+  const collectionEmpty = !hasExistingData;
+  if (
+    collectionEmpty &&
+    currentGitBlobShas !== null &&
+    currentGitBlobShas.size > 0
+  ) {
+    const sibling = await findSiblingMetadata(
+      resolvedPath,
+      currentGitBlobShas,
+      collection,
+    ).catch((err) => {
+      logger.error("findSiblingMetadata threw", {
+        error: err instanceof Error ? err.message : String(err),
+        name: err instanceof Error ? err.name : undefined,
+        stack: err instanceof Error ? err.stack : undefined,
+      });
+      return null;
+    });
+
+    if (sibling !== null) {
+      const diff = diffGitTrees(sibling.gitBlobShas, currentGitBlobShas);
+      onProgress?.(
+        `Sibling-clone candidate: ${sibling.collectionName} (${sibling.matchCount}/${currentGitBlobShas.size} files match). ` +
+          `Diff: ${diff.unchanged.length} unchanged, ${diff.modified.length} modified, ` +
+          `${diff.added.length} added, ${diff.deleted.length} deleted.`,
+      );
+
+      try {
+        progress.phase = "cloning sibling collection";
+        const cloned = await cloneCollectionPoints(
+          sibling.collectionName,
+          collection,
+        );
+        onProgress?.(`Cloned ${cloned} points from ${sibling.collectionName}.`);
+
+        // Drop chunks for files that changed (modified) or no longer exist
+        // (deleted). Batched into a single filter delete with a path-IN
+        // clause — N round-trips → 1 — so post-clone cleanup doesn't dominate
+        // wall time when the diff is in the thousands.
+        const stalePaths = [...diff.deleted, ...diff.modified];
+        if (stalePaths.length > 0) {
+          progress.phase = "cleaning stale chunks";
+          await deleteFileChunksBatch(collection, stalePaths);
+          onProgress?.(`Pruned chunks for ${stalePaths.length} stale files.`);
+        }
+
+        // Seed `hashes` with the unchanged paths' content hashes so the scan
+        // helper's skip-by-hash short-circuit kicks in immediately for any
+        // unchanged file that does end up in the scan set.
+        for (const unchangedPath of diff.unchanged) {
+          const sha = sibling.fileHashes.get(unchangedPath);
+          if (sha !== undefined) hashes.set(unchangedPath, sha);
+        }
+
+        // Build the path subset to scan: modified + added only.
+        const subsetSet = new Set<string>([...diff.modified, ...diff.added]);
+        const allFiles = await getIndexableFiles(resolvedPath, extraExtensions);
+        const targetFiles = allFiles.filter((p) => subsetSet.has(p));
+        progress.filesTotal = allFiles.length;
+        onProgress?.(
+          `Indexing ${targetFiles.length} changed file${targetFiles.length === 1 ? "" : "s"} (${diff.unchanged.length} reused via clone).`,
+        );
+
+        const cloneResult = await scanAndIndexFiles({
+          resolvedPath,
+          collection,
+          hashes,
+          targetFiles,
+          // Pass the FULL working-tree set so the helper's stale-cleanup
+          // loop only deletes chunks for files genuinely missing from disk.
+          // Without this the loop would walk `hashes` (seeded above with
+          // diff.unchanged) and delete every unchanged path because none of
+          // them are in the targetFiles subset.
+          currentFileSet: new Set(allFiles),
+          progress,
+          onProgress,
+          // We just cloned points into the collection; treat as existing data
+          // so the helper's skip-by-hash + stale-chunk paths behave correctly.
+          hasExistingData: true,
+        });
+
+        if (cloneResult.cancelled) {
+          return cloneResult;
+        }
+
+        // ── Path selection: pick exactly one graph strategy, then execute ──
+        // The sibling-clone block has three end-states for the codegraph:
+        //   1. fresh-skip      — graph already matches working tree (rare on a
+        //                        freshly cloned codebase, but possible if the
+        //                        target collection had a stale codegraph from a
+        //                        prior aborted run that happens to be current)
+        //   2. zero-diff-clone — sibling's codegraph is bit-identical; clone
+        //                        the 3 symgraph collections + the codegraph
+        //                        metadata point. No rebuild needed.
+        //   3. small-diff      — diff ≤ INCREMENTAL_SYMBOL_THRESHOLD; clone
+        //                        sibling's 3 symgraph collections as a
+        //                        baseline, rebuildGraph(skipSymbolGraph), then
+        //                        patch only the changed files' symbol payloads.
+        //   4. full-rebuild    — diff exceeds threshold or no usable sibling
+        //                        graph state; rebuildGraph() rebuilds both the
+        //                        codegraph and the symbol graph end-to-end.
+        // Each path performs its own clone work, so no two paths can clone the
+        // same symgraph collection in a single call. Clones are fail-soft —
+        // any error inside the chosen path falls back to a full rebuild
+        // without re-running the earlier clones (see `pathError` handling).
+        const isZeroDiff =
+          diff.modified.length === 0 &&
+          diff.added.length === 0 &&
+          diff.deleted.length === 0;
+        const smallDiffChangedCount =
+          diff.modified.length + diff.added.length + diff.deleted.length;
+
+        // Freshness check is performed up-front, before any graph-side clone,
+        // so the path decision uses the same source of truth across runs and
+        // we don't speculatively clone collections we may immediately discard.
+        // `isGraphFresh` returns false for cold collections; that's expected
+        // on a freshly cloned target (the graph metadata point doesn't exist
+        // yet).
+        const initiallyGraphFresh = await isGraphFresh(
+          resolvedPath,
+          currentGitBlobShas,
+        ).catch(() => false);
+
+        type GraphPath =
+          | "fresh-skip"
+          | "zero-diff-clone"
+          | "small-diff"
+          | "full-rebuild";
+        const graphPath: GraphPath = initiallyGraphFresh
+          ? "fresh-skip"
+          : isZeroDiff && sibling.hasCompleteGraphState
+            ? "zero-diff-clone"
+            : sibling.hasCompleteGraphState &&
+                smallDiffChangedCount > 0 &&
+                smallDiffChangedCount <= INCREMENTAL_SYMBOL_THRESHOLD
+              ? "small-diff"
+              : "full-rebuild";
+
+        const siblingProjectId = sibling.collectionName.replace(
+          /^codebase_/,
+          "",
+        );
+
+        // Helper: clone the three symgraph collections from the sibling. Used
+        // by both the zero-diff and small-diff paths (each path calls this at
+        // most once, so there's no double-clone within a single run).
+        const cloneSymgraphsFromSibling = async (): Promise<void> => {
+          // The three target collections are disjoint (distinct suffixes:
+          // _symgraph_meta / _symgraph_file / _symgraph_index) and
+          // `replaceCollectionFromSibling` holds no shared in-memory state
+          // across calls. Qdrant serves snapshot+recover concurrently, and
+          // `probeWriteReadiness` uses a randomized sentinel id to avoid
+          // collisions. Running them in parallel takes wall-time down to the
+          // slowest of the three (the index clone) instead of summing all
+          // three.
+          await Promise.all([
+            replaceCollectionFromSibling(
+              symgraphMetaCollectionName(siblingProjectId),
+              symgraphMetaCollectionName(projectId),
+            ),
+            replaceCollectionFromSibling(
+              symgraphFileCollectionName(siblingProjectId),
+              symgraphFileCollectionName(projectId),
+            ),
+            replaceCollectionFromSibling(
+              symgraphIndexCollectionName(siblingProjectId),
+              symgraphIndexCollectionName(projectId),
+            ),
+          ]);
+        };
+
+        // `pathHandled` indicates the chosen path completed (or fresh-skip).
+        // When it stays false (because the chosen path threw), we fall back
+        // to a full rebuild after logging — preserving the prior fail-soft
+        // semantics without ever re-cloning collections an earlier branch
+        // already touched.
+        let pathHandled = false;
+
+        if (graphPath === "fresh-skip") {
+          progress.phase = "building code graph";
+          onProgress?.(`Code graph fresh — skipping rebuild.`);
+          logger.info("Code graph fresh, skipping rebuild", {
+            resolvedPath,
+            cloned: false,
+          });
+          pathHandled = true;
+        } else if (graphPath === "zero-diff-clone") {
+          // Working tree exactly matches the sibling's; the sibling's
+          // codegraph is bit-identical and can be reused via collection clone
+          // instead of paying the ~150s rebuildGraph cost. CodeGraphNode
+          // file paths are absolute, but the collection-list-based sibling
+          // discovery filters by `coreProjectId` (path hash) so siblings are
+          // always same-worktree — paths in the cloned graph already match.
+          try {
+            progress.phase = "cloning code graph";
+            await cloneSymgraphsFromSibling();
+            const copied = await cloneGraphMetadataPoint(
+              graphCollectionName(siblingProjectId),
+              graphCollectionName(projectId),
+              { projectPath: resolvedPath, gitBlobShas: currentGitBlobShas },
+            );
+            if (copied) {
+              invalidateGraphCache(resolvedPath);
+              dropSymbolGraphCache(projectId);
+              onProgress?.(`Cloned code graph from sibling.`);
+              pathHandled = true;
+            } else {
+              logger.warn(
+                "Sibling codegraph metadata point missing; falling back to full rebuild",
+                { projectPath: resolvedPath },
+              );
+            }
+          } catch (graphCloneErr) {
+            logger.warn(
+              "Sibling codegraph clone failed; falling back to full rebuild",
+              {
+                projectPath: resolvedPath,
+                error:
+                  graphCloneErr instanceof Error
+                    ? graphCloneErr.message
+                    : String(graphCloneErr),
+              },
+            );
+            // pathHandled stays false → full-rebuild fallback below.
+          }
+        } else if (graphPath === "small-diff") {
+          // Mirrors the watcher path's incremental strategy: clone the
+          // sibling's 3 symgraph collections to seed a baseline, rebuild only
+          // the file-import graph (parse pass #1 — mostly cache hits thanks
+          // to Phase 4-E's blob-sha symbol cache), then patch only the
+          // changed files' symbol payloads. Avoids the ~150s end-to-end
+          // symbol-graph rebuild for small branch diffs.
+          //
+          // `rebuildGraph(skipSymbolGraph: true)` overwrites the codegraph
+          // metadata point via saveGraphData, so we deliberately do NOT
+          // clone that point here — only the three symgraph collections
+          // need a baseline for the incremental updater to mutate.
+          try {
+            progress.phase = "cloning symbol graph baseline";
+            await cloneSymgraphsFromSibling();
+            // Drop the in-process symbol-graph cache so the incremental
+            // updater reads the freshly-cloned shards from Qdrant rather
+            // than any stale cached state for this projectId.
+            dropSymbolGraphCache(projectId);
+
+            progress.phase = "building code graph";
+            const graph = await rebuildGraph(resolvedPath, {
+              skipSymbolGraph: true,
+              gitBlobShas: currentGitBlobShas,
+            });
+            onProgress?.(
+              `Code graph: ${graph.nodes.length} files, ${graph.edges.length} edges (file-import only)`,
+            );
+
+            const incResult = await updateChangedFilesSymbolGraph(
+              projectId,
+              resolvedPath,
+              graph,
+              [...diff.modified, ...diff.added],
+              diff.deleted,
+            );
+            if (incResult.fullRebuildRequired) {
+              // Cloned meta vanished or was malformed — fall back to a full
+              // symbol-graph rebuild. Rare, but safe.
+              onProgress?.(
+                "Symbol graph meta missing after clone — falling back to full rebuild",
+              );
+              await rebuildGraph(resolvedPath, {
+                skipSymbolGraph: false,
+                gitBlobShas: currentGitBlobShas,
+              });
+            } else {
+              onProgress?.(
+                `Symbol graph patched: +${incResult.symbolsDelta} symbols, ` +
+                  `+${incResult.edgesDelta} edges (${incResult.filesChanged} changed, ${incResult.filesRemoved} removed)`,
+              );
+            }
+            pathHandled = true;
+          } catch (smallDiffErr) {
+            const smallDiffMsg =
+              smallDiffErr instanceof Error
+                ? smallDiffErr.message
+                : String(smallDiffErr);
+            logger.warn(
+              "Sibling-clone small-diff incremental path failed; falling back to full rebuild",
+              { projectPath: resolvedPath, error: smallDiffMsg },
+            );
+            // pathHandled stays false → full-rebuild fallback below.
+          }
+        }
+
+        // Full-rebuild fallback: chosen path was "full-rebuild" up-front, OR
+        // the chosen path failed mid-flight (clone error / incremental
+        // updater threw). rebuildGraph() rebuilds the codegraph + symbol
+        // graph end-to-end and overwrites whatever cloned state may have
+        // landed before the failure.
+        if (!pathHandled) {
+          progress.phase = "building code graph";
+          try {
+            const graph = await rebuildGraph(resolvedPath, {
+              gitBlobShas: currentGitBlobShas,
+            });
+            onProgress?.(
+              `Code graph: ${graph.nodes.length} files, ${graph.edges.length} edges`,
+            );
+          } catch (graphErr) {
+            const graphMsg =
+              graphErr instanceof Error ? graphErr.message : String(graphErr);
+            logger.warn(
+              "Code graph build failed during sibling-clone (non-fatal)",
+              { projectPath: resolvedPath, error: graphMsg },
+            );
+          }
+        }
+
+        // The sibling-clone path's graph work is done. If anything below
+        // (saveProjectMetadata, etc.) throws and the outer catch falls us
+        // through to normal-flow, the 4-G concurrent IIFE must NOT redo the
+        // build — we already have a usable codegraph + symgraphs in Qdrant.
+        graphAlreadyBuilt = true;
+
+        progress.phase = "saving metadata";
+        await saveProjectMetadata(
+          collection,
+          resolvedPath,
+          allFiles.length,
+          hashes.size,
+          hashes,
+          "completed",
+          { gitBlobShas: currentGitBlobShas },
+        );
+
+        const totalFilesIndexed =
+          cloneResult.filesIndexed + diff.unchanged.length;
+        onProgress?.(
+          `Indexing complete (sibling-clone): ${totalFilesIndexed} files, ${cloneResult.chunksCreated} chunks`,
+        );
+        lastCompleted.set(resolvedPath, {
+          type: "full-index",
+          completedAt: Date.now(),
+          durationMs: Date.now() - progress.startedAt,
+          filesProcessed: totalFilesIndexed,
+          chunksCreated: cloneResult.chunksCreated,
+        });
+        return {
+          filesIndexed: totalFilesIndexed,
+          chunksCreated: cloneResult.chunksCreated,
+          cancelled: false,
+        };
+      } catch (cloneErr) {
+        logger.warn(
+          "Sibling-clone fast path failed; falling through to full index",
+          {
+            sibling: sibling.collectionName,
+            error: cloneErr instanceof Error ? cloneErr.message : String(cloneErr),
+          },
+        );
+        // Recover may have left no target collection at all OR a partial
+        // one (e.g. snapshot succeeded, recover started, then errored
+        // mid-stream). Drop whatever's there before falling through to the
+        // normal flow so ensureCollection below can recreate a clean,
+        // empty collection with the expected schema.
+        await deleteCollection(collection).catch(() => {});
+        // Fall through to normal flow below.
+      }
+    }
+  }
+
+  // Normal-flow path: no sibling-clone taken (or clone failed and we fell
+  // through). Ensure the target collection exists with the right schema
+  // before scan + embed. Idempotent — no-op if the collection already exists.
+  await ensureCollection(collection);
+
+  if (hasExistingData) {
+    if (hashes.size > 0) {
+      onProgress?.(`Existing index found (${existingInfo?.pointsCount} chunks, ${hashes.size} file hashes), resuming...`);
+    } else {
+      // Collection has data but no hashes — likely a crash before metadata was saved,
+      // or hashes were lost. Re-embed everything but keep existing chunks to avoid
+      // destroying a partially completed index.
+      onProgress?.(`Existing index found (${existingInfo?.pointsCount} chunks, no file hashes). Re-indexing all files (existing chunks preserved)...`);
+    }
+  } else {
+    // Collection is empty or was just created — fresh start, clear any stale in-memory hashes
+    if (existingInfo === null) {
+      onProgress?.(`Setting up collection ${collection} (new)...`);
+      logger.info("Collection did not exist, created fresh", { collection });
+    } else {
+      onProgress?.(`Setting up collection ${collection} (empty, reusing)...`);
+      logger.info("Collection exists but is empty, reusing", { collection, pointsCount: existingInfo.pointsCount });
+    }
+    hashes.clear();
+  }
+
+  // ── Phase 1: Scan + embed AND build code graph (concurrently — Phase 4-G) ──
+  // The two pipelines touch disjoint state: scanAndIndexFiles upserts to
+  // codebase_<id>, while rebuildGraph reads source files from disk and
+  // writes codegraph_<id> + symgraph_*. Running them in parallel saves
+  // wall-time on cold/non-sibling indexes (where both are non-trivial).
+  //
+  // Cancellation note: rebuildGraph has no abort-signal plumbing today, so a
+  // mid-scan cancel will still wait for the in-flight graph build to settle
+  // before returning. We accept this — the graph build is bounded and the
+  // user gets a valid graph even on a cancelled scan.
+  progress.phase = "scanning files";
+  const files = await getIndexableFiles(resolvedPath, extraExtensions);
+  progress.filesTotal = files.length;
+  onProgress?.(`Found ${files.length} indexable files`);
+
+  // Compute graph freshness up-front (cheap; one Qdrant retrieve) so the
+  // graph promise is a no-op when the working tree hasn't moved.
+  // `graphAlreadyBuilt` short-circuits the freshness read when the
+  // sibling-clone path already produced a graph for this run — see the
+  // outer-catch fall-through path: a late failure in saveProjectMetadata
+  // (etc.) lands us here with a fully-built codegraph from the small-diff
+  // or full-rebuild branch above, and the 4-G IIFE must not redo the work.
+  const cgFresh =
+    graphAlreadyBuilt ||
+    (currentGitBlobShas !== null
+      ? await isGraphFresh(resolvedPath, currentGitBlobShas).catch(() => false)
+      : false);
+
+  // Kick off the graph build. The IIFE shape ensures the promise is
+  // scheduled NOW (before we await scan), so the two pipelines actually
+  // run concurrently rather than serializing on the await order.
+  const graphPromise: Promise<void> = cgFresh
+    ? (async () => {
+        if (graphAlreadyBuilt) {
+          onProgress?.(
+            `Code graph already built by sibling-clone path — skipping rebuild.`,
+          );
+          logger.info(
+            "Code graph already built earlier in this run; skipping rebuild",
+            { resolvedPath },
+          );
+        } else {
+          onProgress?.(`Code graph fresh — skipping rebuild.`);
+          logger.info("Code graph fresh, skipping rebuild", { resolvedPath });
+        }
+      })()
+    : (async () => {
+        onProgress?.("Building code dependency graph...");
+        try {
+          const graph = await rebuildGraph(
+            resolvedPath,
+            currentGitBlobShas !== null
+              ? { gitBlobShas: currentGitBlobShas }
+              : undefined,
+          );
+          onProgress?.(
+            `Code graph built: ${graph.nodes.length} files, ${graph.edges.length} edges`,
+          );
+        } catch (graphErr) {
+          const graphMsg =
+            graphErr instanceof Error ? graphErr.message : String(graphErr);
+          logger.warn("Code graph build failed (non-fatal)", {
+            projectPath: resolvedPath,
+            error: graphMsg,
+          });
+          onProgress?.(`Code graph build failed (non-fatal): ${graphMsg}`);
+        }
+      })();
+
+  const scanResult = await scanAndIndexFiles({
+    resolvedPath,
+    collection,
+    hashes,
+    targetFiles: files,
+    progress,
+    onProgress,
+    hasExistingData,
+  });
+
+  if (scanResult.cancelled) {
+    // Wait for the dangling graph promise so we don't leak it past the
+    // function return. graphPromise never rejects (errors are caught
+    // inside the IIFE), so this await is safe.
+    await graphPromise;
+    return scanResult;
+  }
+
+  const filesIndexed = scanResult.filesIndexed;
+  const chunksCreated = scanResult.chunksCreated;
+
+  // Final metadata save (depends on scanResult; can run in parallel with
+  // the tail of the graph build).
+  progress.phase = "saving metadata";
+  await saveProjectMetadata(
+    collection,
+    resolvedPath,
+    filesIndexed,
+    hashes.size,
+    hashes,
+    "completed",
+    currentGitBlobShas != null ? { gitBlobShas: currentGitBlobShas } : undefined,
+  );
+
+  // Surface the graph phase to status consumers if the build is still
+  // in-flight, then await it.
+  progress.phase = "building code graph";
+  await graphPromise;
 
   // Auto-index context artifacts if .socraticodecontextartifacts.json exists
   try {
@@ -994,6 +1796,11 @@ export async function updateProjectIndex(
   const projectId = projectIdFromPath(resolvedPath);
   const collection = collectionName(projectId);
   const hashes = await getProjectHashes(projectId, collection, resolvedPath);
+
+  // Snapshot the current git tree once per run. Null for non-git checkouts
+  // (or unreadable indexes); in that case future fast-path detection
+  // silently falls back to a content-hash scan.
+  const currentGitBlobShas = await getGitBlobShas(resolvedPath);
 
   // Ensure collection exists — getCollectionInfo now throws on transient errors,
   // so a network blip will abort rather than cascade into a destructive fallback.
@@ -1168,9 +1975,17 @@ export async function updateProjectIndex(
       const { pointsSkipped } = await upsertPreEmbeddedChunks(collection, batchPoints);
 
       if (pointsSkipped > 0 && pointsSkipped === batchPoints.length) {
+        // Re-check existence so the error distinguishes "actually deleted"
+        // from "transiently rejecting writes" (e.g. mid-recover, concurrent
+        // index op, BM25 inference engine init). Per-point error details were
+        // already logged via logger.warn in upsertPreEmbeddedChunks's
+        // per-point fallback.
+        const stillExists = (await getCollectionInfo(collection).catch(() => null)) != null;
         throw new Error(
           `Qdrant upsert: all ${batchPoints.length} points in batch ${batchNum}/${totalBatches} ` +
-          `were skipped (collection=${collection}). The collection may have been deleted externally.`
+          `were rejected (collection=${collection}, exists=${stillExists}). ` +
+          `${stillExists ? "Collection is alive but rejected every point — likely a transient write window or schema mismatch." : "Collection was deleted externally."} ` +
+          `Underlying per-point errors were logged via logger.warn.`
         );
       }
 
@@ -1203,7 +2018,15 @@ export async function updateProjectIndex(
   }
 
   // Persist updated hashes
-  await saveProjectMetadata(collection, resolvedPath, currentFiles.length, hashes.size, hashes, "completed");
+  await saveProjectMetadata(
+    collection,
+    resolvedPath,
+    currentFiles.length,
+    hashes.size,
+    hashes,
+    "completed",
+    currentGitBlobShas != null ? { gitBlobShas: currentGitBlobShas } : undefined,
+  );
 
   // Auto-rebuild code graph if any files changed (Phase F).
   //
@@ -1227,7 +2050,11 @@ export async function updateProjectIndex(
           ? `Building file graph + incrementally updating ${totalChanged} symbol payload(s)...`
           : "Building code dependency graph (full rebuild)...",
       );
-      const graph = await rebuildGraph(resolvedPath, { skipSymbolGraph: useIncremental });
+      const blobsForRebuild = currentGitBlobShas ?? undefined;
+      const graph = await rebuildGraph(resolvedPath, {
+        skipSymbolGraph: useIncremental,
+        gitBlobShas: blobsForRebuild,
+      });
       onProgress?.(`Code graph built: ${graph.nodes.length} files, ${graph.edges.length} edges`);
 
       if (useIncremental) {
@@ -1242,7 +2069,10 @@ export async function updateProjectIndex(
           if (result.fullRebuildRequired) {
             // Meta vanished between checks — fall back to a full symbol rebuild.
             onProgress?.("Symbol graph meta missing — falling back to full rebuild");
-            await rebuildGraph(resolvedPath, { skipSymbolGraph: false });
+            await rebuildGraph(resolvedPath, {
+              skipSymbolGraph: false,
+              gitBlobShas: blobsForRebuild,
+            });
           } else {
             onProgress?.(
               `Symbol graph patched: +${result.symbolsDelta} symbols, ` +
@@ -1256,7 +2086,10 @@ export async function updateProjectIndex(
             projectPath: resolvedPath,
             error: incMsg,
           });
-          await rebuildGraph(resolvedPath, { skipSymbolGraph: false });
+          await rebuildGraph(resolvedPath, {
+            skipSymbolGraph: false,
+            gitBlobShas: blobsForRebuild,
+          });
         }
       }
     } catch (graphErr) {
