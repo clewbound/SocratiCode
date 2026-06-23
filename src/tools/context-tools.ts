@@ -3,6 +3,7 @@
 import path from "node:path";
 import { contextCollectionName, projectIdFromPath } from "../config.js";
 import { SEARCH_MIN_SCORE } from "../constants.js";
+import { maybeRegisterFromTool } from "../daemon/watchlist.js";
 import {
   ensureArtifactsIndexed,
   indexAllArtifacts,
@@ -24,6 +25,7 @@ export async function handleContextTool(
 ): Promise<string> {
   const projectPath = (args.projectPath as string) || process.cwd();
   const resolvedPath = path.resolve(projectPath);
+  maybeRegisterFromTool(resolvedPath);
 
   switch (name) {
     case "codebase_context": {

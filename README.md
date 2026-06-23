@@ -913,6 +913,40 @@ Cost scales linearly with actual file changes. A typical feature-branch checkout
 - Sibling clone fails partway (e.g. Qdrant connectivity blip) — SocratiCode logs the failure, drops the partial target, and falls through to a normal full index
 - Active merge conflict in the working tree (files at non-zero git stages are excluded from the blob-sha map, leading to a size mismatch)
 
+### Migrating from `BRANCH_AWARE` to repo-keying
+
+If you've been running `SOCRATICODE_BRANCH_AWARE=true`, your collections are
+keyed by `<pathhash>__<branch>`. Repo-keying (and daemon mode) uses
+`<repoId>__<branch>` instead. To preserve your indexed branches when upgrading:
+
+```bash
+# preview what would change:
+socraticode migrate-legacy-keying --dry-run
+
+# perform the migration:
+socraticode migrate-legacy-keying
+
+# already migrated, want to re-run:
+socraticode migrate-legacy-keying --force
+```
+
+Migration is idempotent (gated by a marker file in `~/Library/Application Support/socraticode/`
+on macOS or `~/.local/state/socraticode/` on Linux).
+
+### Running as a daemon
+
+For multi-worktree workflows or if you want a single SocratiCode process serving
+all your MCP clients, see [DAEMON.md](DAEMON.md). Quick path:
+
+```bash
+socraticode daemon &
+# Update .mcp.json: "type": "http", "url": "http://127.0.0.1:23700/mcp"
+```
+
+DAEMON.md covers launchd/systemd autostart, env-var reference, GC tuning,
+admin CLI (`socraticode daemon status|watchlist|watch|unwatch|gc`), migration
+from `SOCRATICODE_BRANCH_AWARE`, and troubleshooting.
+
 ### Available tools
 
 Once connected, 21 tools are available to your AI assistant:
@@ -1254,6 +1288,8 @@ The rest of this section documents the variables themselves. Pass them using whi
 | `SEARCH_MIN_SCORE` | `0.10` | Minimum RRF (Reciprocal Rank Fusion) score threshold (0-1). Results below this score are filtered out. Helps remove low-relevance noise from search results. Set to `0` to disable filtering (returns all results up to `limit`). Can be overridden per-query via the `minScore` tool parameter. Works together with `limit`: results are first filtered by score, then capped at `limit`. |
 | `SOCRATICODE_PROJECT_ID` | *(none)* | Override the auto-generated project ID. When set, all paths resolve to the same Qdrant collections, allowing multiple directories (e.g. git worktrees of the same repo) to share a single index. Must match `[a-zA-Z0-9_-]+`. Takes precedence over the `projectId` field in `.socraticode.json`. |
 | `SOCRATICODE_BRANCH_AWARE` | `false` | When `true`, append the current git branch name to the project ID, creating separate Qdrant collections per branch. Ignored when `SOCRATICODE_PROJECT_ID` is set or when `projectId` is set in `.socraticode.json`. |
+| `SOCRATICODE_REPO_KEYING` | `false` | Opt into per-(repo, branch) collection keying. All worktrees of one repo share branch collections by `repoId` instead of by path-hash. Required for daemon mode. |
+| `SOCRATICODE_REPO_ID` | *(none)* | Explicit override for the repo identifier (otherwise derived from `git rev-parse --git-common-dir`). Honored only when repo-keying is active. |
 | `SOCRATICODE_LINKED_PROJECTS` | *(none)* | Comma-separated list of additional project paths to include in cross-project search. Merged with paths from `.socraticode.json`. Non-existent paths are silently skipped. |
 | `SOCRATICODE_AUTO_RESUME` | *(none)* | When set to `all`, server startup auto-resumes the file watcher plus an incremental catch-up update for **every** indexed project that has a stored path, not just the current working directory. Projects resume one at a time (sequentially) to avoid overloading the embedding provider. Skipped projects (directory no longer exists, or indexed before path tracking was added) are logged at warn level. Useful when one MCP server session should keep many canonical checkouts fresh. |
 | `SOCRATICODE_AUTO_RESUME_PROJECTS` | *(none)* | Comma-separated list of project paths to auto-resume on server startup (sequentially), e.g. `/repos/api,/repos/web`. Takes precedence over `SOCRATICODE_AUTO_RESUME`. Paths that do not exist or are not indexed are skipped with a warning. |

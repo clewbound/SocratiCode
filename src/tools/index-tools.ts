@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Giancarlo Erra - Altaire Limited
 import path from "node:path";
 import { mergeExtraExtensions, QDRANT_MODE } from "../constants.js";
+import { maybeRegisterFromTool } from "../daemon/watchlist.js";
 import { awaitGraphBuild, isGraphBuildInProgress } from "../services/code-graph.js";
 import type { InfraProgressCallback } from "../services/docker.js";
 import { ensureQdrantReady, isDockerAvailable } from "../services/docker.js";
@@ -66,6 +67,7 @@ export async function handleIndexTool(
   args: Record<string, unknown>,
 ): Promise<string> {
   const projectPath = (args.projectPath as string) || process.cwd();
+  maybeRegisterFromTool(path.resolve(projectPath));
   const progressMessages: string[] = [];
   const onProgress = (msg: string) => {
     progressMessages.push(msg);

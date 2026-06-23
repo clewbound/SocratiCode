@@ -3,7 +3,7 @@
 import path from "node:path";
 import type { AsyncSubscription, Event } from "@parcel/watcher";
 import watcher from "@parcel/watcher";
-import { collectionName, projectIdFromPath } from "../config.js";
+import { collectionName, detectGitBranch, projectIdFromPath } from "../config.js";
 import { SPECIAL_FILES, SUPPORTED_EXTENSIONS } from "../constants.js";
 import { invalidateGraphCache } from "./code-graph.js";
 import { createIgnoreFilter, shouldIgnore } from "./ignore.js";
@@ -33,6 +33,13 @@ const externalWatchCache = new Map<string, number>();
 
 /** How long to cache the "another process is watching" result before rechecking */
 const EXTERNAL_WATCH_CACHE_TTL_MS = 60_000;
+
+/**
+ * Last-seen git branch per resolved project path. Used as a HEAD-watcher
+ * fallback (spec §9): when the dedicated head-watcher fails to subscribe, the
+ * file watcher still notices branch flips opportunistically and logs them.
+ */
+const lastSeenBranches = new Map<string, string | null>();
 
 function isIndexableFile(filePath: string): boolean {
   const fileName = path.basename(filePath);
@@ -86,6 +93,7 @@ function buildIgnoreGlobs(): string[] {
 export async function startWatching(
   projectPath: string,
   onProgress?: (message: string) => void,
+  onActivity?: () => void,
 ): Promise<boolean> {
   const resolvedPath = path.resolve(projectPath);
 
@@ -116,7 +124,36 @@ export async function startWatching(
       resolvedPath,
       setTimeout(async () => {
         debounceTimers.delete(resolvedPath);
+        // Activity signal fires once per debounce burst, independent of the
+        // reindex outcome. Callback is best-effort: a throw here must not
+        // break the indexer (e.g. so a watchlist-persist failure can't take
+        // the watcher offline).
+        if (onActivity) {
+          try {
+            onActivity();
+          } catch (err) {
+            logger.warn("onActivity callback threw (continuing)", {
+              path: resolvedPath,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
+        }
         try {
+          // Degraded-mode fallback for spec §9: if the dedicated HEAD watcher
+          // failed to subscribe, the file watcher still notices branch flips
+          // here. The actual collection swap is handled downstream by
+          // projectIdFromPath; we only log the transition for observability.
+          const currentBranch = detectGitBranch(resolvedPath);
+          const lastSeen = lastSeenBranches.get(resolvedPath);
+          if (lastSeenBranches.has(resolvedPath) && lastSeen !== currentBranch) {
+            logger.info("file-watcher-detected branch flip (HEAD watcher may be inactive)", {
+              path: resolvedPath,
+              from: lastSeen,
+              to: currentBranch,
+            });
+          }
+          lastSeenBranches.set(resolvedPath, currentBranch);
+
           onProgress?.(`Detected changes, updating index for ${resolvedPath}...`);
 
           // Invalidate the code graph cache so it will be rebuilt
