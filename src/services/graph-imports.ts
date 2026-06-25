@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 Giancarlo Erra - Altaire Limited
-import { Lang, parse } from "@ast-grep/napi";
+import { Lang, parse, type SgNode } from "@ast-grep/napi";
 import { logger } from "./logger.js";
 
 // ── Import extraction per language ───────────────────────────────────────
@@ -46,7 +46,7 @@ function extractCssImports(source: string): ImportInfo[] {
 }
 
 /** Extract JS/TS imports from an ast-grep root node. Shared by JS/TS and Svelte/Vue handlers. */
-function extractJsTsImportsFromNode(sgNode: ReturnType<ReturnType<typeof parse>["root"]>): ImportInfo[] {
+function extractJsTsImportsFromNode(sgNode: SgNode): ImportInfo[] {
   const imports: ImportInfo[] = [];
 
   // import ... from "..."
@@ -88,8 +88,19 @@ function extractJsTsImportsFromNode(sgNode: ReturnType<ReturnType<typeof parse>[
 /**
  * Extract import statements from source code using ast-grep.
  * Returns raw module specifiers for each language's import syntax.
+ *
+ * `parsedRoot` lets `buildCodeGraph` parse a file once and share the AST with
+ * both `extractImports` and `extractSymbolsAndCalls`, halving the parse cost
+ * on the hot rebuild loop. Languages that don't use ast-grep here (regex-only
+ * like Dart/Lua, or composite Svelte/Vue which need a separate HTML+TS pass)
+ * ignore this argument and parse internally.
  */
-export function extractImports(source: string, lang: Lang | string, _ext: string): ImportInfo[] {
+export function extractImports(
+  source: string,
+  lang: Lang | string,
+  _ext: string,
+  parsedRoot?: SgNode,
+): ImportInfo[] {
   const imports: ImportInfo[] = [];
   const langKey = String(lang);
 
@@ -150,7 +161,7 @@ export function extractImports(source: string, lang: Lang | string, _ext: string
 
   // ── AST-based extraction for languages with grammar support ───────────
   try {
-    const sgNode = parse(lang, source).root();
+    const sgNode = parsedRoot ?? parse(lang, source).root();
 
     switch (langKey) {
       case "python": {
