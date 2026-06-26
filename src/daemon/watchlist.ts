@@ -172,7 +172,7 @@ export async function registerPath(p: string, via: "implicit" | "explicit"): Pro
 
   // Add the queried path first.
   watchlist.add({ path: resolved, repoId, commonDir, addedVia: via });
-  await startWatching(resolved).catch(() => {
+  await startWatching(resolved, undefined, () => watchlist.touch(resolved)).catch(() => {
     /* watcher logs its own errors */
   });
 
@@ -203,7 +203,7 @@ export async function registerPath(p: string, via: "implicit" | "explicit"): Pro
         commonDir: detectGitCommonDir(wt.path),
         addedVia: "implicit", // siblings are always implicit; user can promote later
       });
-      await startWatching(wt.path).catch(() => {
+      await startWatching(wt.path, undefined, () => watchlist.touch(wt.path)).catch(() => {
         /* watcher logs its own errors */
       });
     }

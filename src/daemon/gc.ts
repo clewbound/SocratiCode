@@ -18,6 +18,7 @@
 import { execFile } from "node:child_process";
 import fs from "node:fs";
 import { promisify } from "node:util";
+import { sanitizeBranchName } from "../config.js";
 import { logger } from "../services/logger.js";
 import { deleteCollection, getClient } from "../services/qdrant.js";
 import { clearMarkedDeadAt, getMarkedDeadAt, setMarkedDeadAt } from "./qdrant-meta.js";
@@ -100,7 +101,7 @@ interface ParsedName {
 export function parseCollectionName(name: string): ParsedName | null {
   // Matches: <prefix?><repoId>[__<branch>][_symgraph_(meta|file|index)]?
   const m =
-    /^(codebase_|codegraph_|context_)?([A-Za-z0-9_-]+?)(?:__([A-Za-z0-9_-]+))?(_symgraph_(?:meta|file|index))?$/.exec(
+    /^(codebase_|codegraph_|context_)?([A-Za-z0-9_-]+?)(?:__([A-Za-z0-9_-]+?))?(_symgraph_(?:meta|file|index))?$/.exec(
       name,
     );
   if (!m) return null;
@@ -114,6 +115,29 @@ export function parseCollectionName(name: string): ParsedName | null {
     branch,
     detached: branch?.startsWith("detached_") ?? false,
   };
+}
+
+/**
+ * Parse `git for-each-ref --format=%(refname:short)` stdout into the set of
+ * live branch names *in the same domain* as `parseCollectionName` output —
+ * i.e. with `sanitizeBranchName` applied so a branch `dion/foo` matches the
+ * `dion_foo` suffix that appears inside collection names.
+ *
+ * Strips `origin/` prefixes so a remote-tracking ref and its local
+ * counterpart collapse to one entry.
+ *
+ * Exported for unit testing.
+ */
+export function parseLiveBranchesFromGit(stdout: string): Set<string> {
+  const out = new Set<string>();
+  for (const line of stdout.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const stripped = trimmed.replace(/^origin\//, "");
+    const sanitized = sanitizeBranchName(stripped);
+    if (sanitized) out.add(sanitized);
+  }
+  return out;
 }
 
 /**
@@ -141,15 +165,7 @@ async function collectLiveBranchesPerRepo(): Promise<Map<string, Set<string>>> {
         ],
         { cwd: entry.path, timeout: 5000 },
       );
-      const branches = new Set<string>();
-      for (const line of stdout.split("\n")) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
-        // Strip "origin/" prefix from remote refs so a remote `origin/main`
-        // and a local `main` are treated as the same live branch.
-        branches.add(trimmed.replace(/^origin\//, ""));
-      }
-      out.set(entry.repoId, branches);
+      out.set(entry.repoId, parseLiveBranchesFromGit(stdout));
     } catch (err) {
       logger.warn("git for-each-ref failed; skipping repo for collection GC", {
         repoId: entry.repoId,

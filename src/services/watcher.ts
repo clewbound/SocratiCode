@@ -93,6 +93,7 @@ function buildIgnoreGlobs(): string[] {
 export async function startWatching(
   projectPath: string,
   onProgress?: (message: string) => void,
+  onActivity?: () => void,
 ): Promise<boolean> {
   const resolvedPath = path.resolve(projectPath);
 
@@ -123,6 +124,20 @@ export async function startWatching(
       resolvedPath,
       setTimeout(async () => {
         debounceTimers.delete(resolvedPath);
+        // Activity signal fires once per debounce burst, independent of the
+        // reindex outcome. Callback is best-effort: a throw here must not
+        // break the indexer (e.g. so a watchlist-persist failure can't take
+        // the watcher offline).
+        if (onActivity) {
+          try {
+            onActivity();
+          } catch (err) {
+            logger.warn("onActivity callback threw (continuing)", {
+              path: resolvedPath,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
+        }
         try {
           // Degraded-mode fallback: if the dedicated HEAD watcher
           // failed to subscribe, the file watcher still notices branch flips

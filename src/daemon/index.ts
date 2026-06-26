@@ -78,15 +78,15 @@ export async function main(): Promise<number> {
   return await new Promise(() => 0);
 }
 
-/** Re-arm persisted file watchers from the on-disk watchlist. */
-async function initWatchlist(): Promise<void> {
+/** Re-arm persisted file watchers from the on-disk watchlist. Exported for testing. */
+export async function initWatchlist(): Promise<void> {
   watchlist.load();
   for (const entry of watchlist.entries()) {
     if (!fs.existsSync(entry.path)) {
       logger.warn("watchlist entry path no longer exists, will GC", { path: entry.path });
       continue; // GC sweep handles removal
     }
-    await startWatching(entry.path).catch((err) => {
+    await startWatching(entry.path, undefined, () => watchlist.touch(entry.path)).catch((err) => {
       logger.error("failed to re-arm watcher on startup", {
         path: entry.path,
         error: err instanceof Error ? err.message : String(err),
