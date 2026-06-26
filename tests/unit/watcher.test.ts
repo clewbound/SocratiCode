@@ -46,9 +46,11 @@ vi.mock("../../src/services/code-graph.js", () => ({
 
 const mockProjectIdFromPath = vi.fn((_p: string) => "test-project-id");
 const mockCollectionName = vi.fn((_id: string) => "codebase_test");
+const mockDetectGitBranch = vi.fn((_p: string): string | null => null);
 vi.mock("../../src/config.js", () => ({
   projectIdFromPath: (...args: unknown[]) => mockProjectIdFromPath(...(args as [string])),
   collectionName: (...args: unknown[]) => mockCollectionName(...(args as [string])),
+  detectGitBranch: (...args: unknown[]) => mockDetectGitBranch(...(args as [string])),
 }));
 
 const mockGetCollectionInfo = vi.fn(async (_c: string): Promise<{ pointsCount: number } | null> => null);

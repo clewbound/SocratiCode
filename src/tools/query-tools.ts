@@ -3,6 +3,7 @@
 import path from "node:path";
 import { collectionName, projectIdFromPath, resolveLinkedCollections } from "../config.js";
 import { SEARCH_DEFAULT_LIMIT, SEARCH_MIN_SCORE } from "../constants.js";
+import { maybeRegisterFromTool } from "../daemon/watchlist.js";
 import { getGraphStatus } from "../services/code-graph.js";
 import { getArtifactStatusSummary } from "../services/context-artifacts.js";
 import { ensureQdrantReady } from "../services/docker.js";
@@ -51,6 +52,7 @@ export async function handleQueryTool(
 ): Promise<string> {
   const projectPath = (args.projectPath as string) || process.cwd();
   const resolvedPath = path.resolve(projectPath);
+  maybeRegisterFromTool(resolvedPath);
   const projectId = projectIdFromPath(resolvedPath);
   const collection = collectionName(projectId);
 
