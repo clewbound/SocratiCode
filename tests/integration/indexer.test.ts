@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 Giancarlo Erra - Altaire Limited
 
+import { execSync } from "node:child_process";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { collectionName, projectIdFromPath } from "../../src/config.js";
@@ -343,5 +344,69 @@ describe.skipIf(!dockerAvailable)("indexer service — embedding cache", () => {
       ).toBe(true);
     },
     180_000,
+  );
+});
+
+describe.skipIf(!dockerAvailable)("indexer service — same-collection fast-skip", () => {
+  beforeAll(async () => {
+    await ensureQdrantReady();
+    await ensureOllamaReady();
+    await waitForQdrant();
+    await waitForOllama();
+  });
+
+  it(
+    "skips scan + embed when re-indexing an unchanged branch (same-collection fast path)",
+    async () => {
+      const fixture = createFixtureProject("fast-skip-test");
+      try {
+        // Fast-path requires a git index — initialise the fixture as a git repo
+        // and stage every file so getGitBlobShas can read blob shas.
+        const gitOpts = {
+          cwd: fixture.root,
+          stdio: "ignore" as const,
+          env: {
+            ...process.env,
+            GIT_AUTHOR_NAME: "Fast Skip Test",
+            GIT_AUTHOR_EMAIL: "fast-skip@example.com",
+            GIT_COMMITTER_NAME: "Fast Skip Test",
+            GIT_COMMITTER_EMAIL: "fast-skip@example.com",
+          },
+        };
+        execSync("git init -q", gitOpts);
+        execSync("git add -A", gitOpts);
+        execSync("git commit -q -m initial", gitOpts);
+
+        process.env.SOCRATICODE_PROJECT_ID = "fast-skip-populate";
+        const first = await indexProject(fixture.root);
+        expect(first.chunksCreated).toBeGreaterThan(0);
+
+        // Second index on the SAME collection with no file changes
+        const messages: string[] = [];
+        const start = Date.now();
+        const second = await indexProject(fixture.root, (m) => messages.push(m));
+        const elapsedMs = Date.now() - start;
+
+        // Fast-path took: explicit fast-path progress message must be present.
+        expect(messages.some((m) => /fast.path/i.test(m))).toBe(true);
+
+        // Fast-path skipped scan + embed: no "indexable files" scan message
+        // and no "generating embeddings" message.
+        expect(messages.some((m) => m.includes("indexable files"))).toBe(false);
+        expect(messages.some((m) => m.includes("generating embeddings"))).toBe(false);
+
+        expect(elapsedMs).toBeLessThan(30_000);
+        expect(second.chunksCreated).toBe(0);
+      } finally {
+        try {
+          await removeProjectIndex(fixture.root);
+        } catch {
+          // ignore
+        }
+        delete process.env.SOCRATICODE_PROJECT_ID;
+        fixture.cleanup();
+      }
+    },
+    300_000,
   );
 });
