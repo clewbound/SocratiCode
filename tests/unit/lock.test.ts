@@ -45,6 +45,7 @@ import lockfile from "proper-lockfile";
 // Import after mocks are set up
 import {
   acquireProjectLock,
+  cleanupStaleLocks,
   getLockHolderPid,
   isProjectLocked,
   releaseAllLocks,
@@ -226,6 +227,44 @@ describe("lock", () => {
       const result = await terminateLockHolder("/tmp/nonexistent-project-xyzzy", "index");
       expect(result.terminated).toBe(false);
       expect(result.pid).toBe(null);
+    });
+  });
+
+  describe("cleanupStaleLocks", () => {
+    it("does not throw when the lock dir is empty", async () => {
+      // Ensure dir exists but is empty (release any leftover entries first)
+      await releaseAllLocks();
+      try {
+        const entries = fs.readdirSync(LOCK_DIR);
+        for (const entry of entries) {
+          if (entry.includes("socraticode-test")) {
+            fs.unlinkSync(path.join(LOCK_DIR, entry));
+          }
+        }
+      } catch { /* dir may not exist yet */ }
+      await expect(cleanupStaleLocks()).resolves.toBeUndefined();
+    });
+
+    it("removes a lock file the mock reports as not held", async () => {
+      // Create a stale-looking lock file that the mock considers unlocked.
+      const stalePath = path.join(LOCK_DIR, "socraticode-test-stale-cleanup");
+      fs.mkdirSync(LOCK_DIR, { recursive: true });
+      fs.writeFileSync(stalePath, "99999\n");
+      // Mock check ⇒ false means not held ⇒ should be removed.
+      vi.mocked(lockfile.check).mockResolvedValueOnce(false);
+      await cleanupStaleLocks();
+      expect(fs.existsSync(stalePath)).toBe(false);
+    });
+
+    it("leaves files alone when the mock reports them as held", async () => {
+      const livePath = path.join(LOCK_DIR, "socraticode-test-live-cleanup");
+      fs.mkdirSync(LOCK_DIR, { recursive: true });
+      fs.writeFileSync(livePath, `${process.pid}\n`);
+      vi.mocked(lockfile.check).mockResolvedValueOnce(true);
+      await cleanupStaleLocks();
+      expect(fs.existsSync(livePath)).toBe(true);
+      // Cleanup
+      fs.unlinkSync(livePath);
     });
   });
 

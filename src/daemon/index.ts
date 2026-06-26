@@ -2,14 +2,21 @@
 // Copyright (C) 2026 Giancarlo Erra - Altaire Limited
 
 import fs from "node:fs";
+import { cleanupStaleLocks } from "../services/lock.js";
 import { logger } from "../services/logger.js";
 import { gracefulShutdown } from "../services/startup.js";
 import { startWatching } from "../services/watcher.js";
+import { runCollectionGc, runWatchlistGc } from "./gc.js";
 import { defaultHeadChangeHandler } from "./head-handler.js";
 import { startHeadWatcher } from "./head-watcher.js";
 import { detectLegacyCollections } from "./legacy-detect.js";
 import { type DaemonServerHandle, startDaemonServer } from "./server.js";
 import { watchlist } from "./watchlist.js";
+
+const GC_INTERVAL_HOURS = Number.parseInt(
+  process.env.SOCRATICODE_GC_INTERVAL_HOURS ?? "24",
+  10,
+);
 
 export async function main(): Promise<number> {
   // Make the process easy to find in `ps aux | grep socraticode`.
@@ -17,6 +24,9 @@ export async function main(): Promise<number> {
 
   // Implies repo-keying for projectIdFromPath
   process.env.SOCRATICODE_DAEMON_MODE = "true";
+
+  // Reclaim lock files orphaned by a previous daemon crash.
+  await cleanupStaleLocks();
 
   let handle: DaemonServerHandle;
   try {
@@ -39,12 +49,17 @@ export async function main(): Promise<number> {
   await initWatchlist(); // re-arm persisted watchers
   await initHeadWatcher(); // start HEAD-flip watchers per repo
 
+  // Schedule periodic GC sweeps + run one immediately so a freshly
+  // started daemon reconciles state without waiting a full interval.
+  const gcTimer = await startGcSchedule();
+
   // Graceful shutdown
   let shuttingDown = false;
   const shutdown = async (signal: string) => {
     if (shuttingDown) return;
     shuttingDown = true;
     logger.info("Daemon shutting down", { signal });
+    clearInterval(gcTimer);
     await gracefulShutdown(signal, async () => {
       await handle.close();
     });
@@ -106,4 +121,40 @@ async function initHeadWatcher(): Promise<void> {
     }
   }
   logger.info("HEAD watchers initialized", { count: seen.size });
+}
+
+/**
+ * Run watchlist + collection GC once on startup, then every
+ * `SOCRATICODE_GC_INTERVAL_HOURS` (default 24h). Errors inside the periodic
+ * tick are logged but never propagated — the timer must keep firing so a
+ * single transient Qdrant blip doesn't stall GC indefinitely.
+ *
+ * Returns the timer handle so the shutdown path can clear it.
+ */
+async function startGcSchedule(): Promise<NodeJS.Timeout> {
+  // Best-effort startup sweep. Don't let GC failure prevent the daemon from
+  // serving requests — log and move on; the next periodic tick will retry.
+  try {
+    await runWatchlistGc({ dryRun: false });
+    await runCollectionGc({ dryRun: false });
+  } catch (err) {
+    logger.error("startup GC failed", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+  const intervalMs = GC_INTERVAL_HOURS * 60 * 60 * 1000;
+  const timer = setInterval(async () => {
+    try {
+      await runWatchlistGc({ dryRun: false });
+      await runCollectionGc({ dryRun: false });
+    } catch (err) {
+      logger.error("periodic GC failed", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }, intervalMs);
+  // unref so an idle GC timer doesn't keep the event loop alive on its own.
+  timer.unref();
+  logger.info("GC schedule armed", { intervalHours: GC_INTERVAL_HOURS });
+  return timer;
 }
