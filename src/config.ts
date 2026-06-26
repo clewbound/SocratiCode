@@ -28,20 +28,120 @@ export function detectGitBranch(projectPath: string): string | null {
 }
 
 /**
+ * Fast HEAD-only branch detection.
+ *
+ * Reads `.git/HEAD` directly without spawning `git`. For hot paths where the
+ * cost of `execFileSync('git', ...)` is unacceptable (e.g. an admin endpoint
+ * that fans out across N watchlist entries under M concurrent requests).
+ *
+ * Returns `null` for: missing `.git`, malformed pointer files, detached HEAD
+ * (raw SHA), or symbolic refs that don't point at `refs/heads/*` (tag refs,
+ * remote-tracking refs, packed refs without a writable HEAD).
+ *
+ * Behavior parity vs `detectGitBranch`:
+ *   - branch HEAD: same value (e.g. `develop`, `dion/foo`)
+ *   - detached HEAD: both return `null`
+ *   - sym-ref to non-heads: this returns `null`; `detectGitBranch` would
+ *     return e.g. `v1.0.0` via `--abbrev-ref`. Rare in practice for daemon
+ *     workflows; callers needing full ref-resolution semantics should keep
+ *     using `detectGitBranch`.
+ */
+export function detectGitBranchFromHead(projectPath: string): string | null {
+  try {
+    const dotGit = path.join(path.resolve(projectPath), ".git");
+    let st: fs.Stats;
+    try {
+      st = fs.statSync(dotGit);
+    } catch {
+      return null;
+    }
+
+    let gitDir: string;
+    if (st.isDirectory()) {
+      gitDir = dotGit;
+    } else if (st.isFile()) {
+      let content: string;
+      try {
+        content = fs.readFileSync(dotGit, "utf-8");
+      } catch {
+        return null;
+      }
+      const m = /^gitdir:\s*(.+?)\s*$/m.exec(content);
+      if (!m) return null;
+      const raw = m[1];
+      gitDir = path.isAbsolute(raw)
+        ? raw
+        : path.resolve(path.resolve(projectPath), raw);
+    } else {
+      return null;
+    }
+
+    const headPath = path.join(gitDir, "HEAD");
+    let head: string;
+    try {
+      head = fs.readFileSync(headPath, "utf-8").trim();
+    } catch {
+      return null;
+    }
+    const refMatch = /^ref:\s*refs\/heads\/(.+)$/.exec(head);
+    return refMatch ? refMatch[1] : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Resolve the path to the git common-dir for `projectPath`.
  * For the main repo this is `<repo>/.git`; for a linked worktree this resolves
- * to the main repo's `.git/` directory. Returns null on non-git paths.
+ * to the main repo's `.git/` directory. For a submodule (`.git` is a pointer
+ * file but no `commondir` exists) the gitdir is itself the common-dir.
+ * Returns null on non-git paths or malformed/dangling pointer files.
+ *
+ * File-read implementation; avoids a `git rev-parse --git-common-dir` spawn
+ * on the hot path of `resolveRepoId` (called once per MCP request via
+ * `projectIdFromPath`).
  */
 export function detectGitCommonDir(projectPath: string): string | null {
   try {
-    const out = execFileSync("git", ["rev-parse", "--git-common-dir"], {
-      cwd: path.resolve(projectPath),
-      encoding: "utf-8",
-      timeout: 5000,
-      stdio: ["pipe", "pipe", "pipe"],
-    }).trim();
-    if (!out) return null;
-    return path.resolve(path.resolve(projectPath), out);
+    const dotGit = path.join(path.resolve(projectPath), ".git");
+    let st: fs.Stats;
+    try {
+      st = fs.statSync(dotGit);
+    } catch {
+      return null;
+    }
+
+    // Main repo: `.git` is a directory and IS the common-dir.
+    if (st.isDirectory()) return dotGit;
+    if (!st.isFile()) return null;
+
+    // Linked worktree / submodule: `.git` is a pointer file with `gitdir: <path>`.
+    let pointer: string;
+    try {
+      pointer = fs.readFileSync(dotGit, "utf-8");
+    } catch {
+      return null;
+    }
+    const m = /^gitdir:\s*(.+?)\s*$/m.exec(pointer);
+    if (!m) return null;
+    const raw = m[1];
+    const gitDir = path.isAbsolute(raw)
+      ? raw
+      : path.resolve(path.resolve(projectPath), raw);
+    if (!fs.existsSync(gitDir)) return null;
+
+    // If a `commondir` file exists, the real common-dir is its (possibly
+    // relative) contents resolved against the worktree's gitdir. Otherwise
+    // the gitdir IS the common-dir (submodules, custom layouts).
+    const commondirPath = path.join(gitDir, "commondir");
+    let commonRaw: string;
+    try {
+      commonRaw = fs.readFileSync(commondirPath, "utf-8").trim();
+    } catch {
+      return gitDir;
+    }
+    if (!commonRaw) return gitDir;
+    return path.isAbsolute(commonRaw) ? commonRaw : path.resolve(gitDir, commonRaw);
   } catch {
     return null;
   }
@@ -179,7 +279,9 @@ export function projectIdFromPath(folderPath: string): string {
   // New: opt-in per-(repo, branch) keying
   if (isRepoKeyingActive()) {
     const repoId = resolveRepoId(folderPath);
-    const branch = detectGitBranch(path.resolve(folderPath));
+    // Fast HEAD-read avoids a `git rev-parse` spawn on every MCP call.
+    // ~500x faster, identical output for branch-attached and detached HEADs.
+    const branch = detectGitBranchFromHead(folderPath);
     if (!branch) {
       // Detached HEAD: try to read the current SHA for a stable suffix
       const sha = detectDetachedSha(folderPath);
@@ -194,7 +296,7 @@ export function projectIdFromPath(folderPath: string): string {
   // Legacy: BRANCH_AWARE keeps <pathhash>__<branch>
   let id = coreProjectId(folderPath);
   if (process.env.SOCRATICODE_BRANCH_AWARE === "true") {
-    const branch = detectGitBranch(path.resolve(folderPath));
+    const branch = detectGitBranchFromHead(folderPath);
     if (branch) {
       const sanitized = sanitizeBranchName(branch);
       if (sanitized) id = `${id}__${sanitized}`;

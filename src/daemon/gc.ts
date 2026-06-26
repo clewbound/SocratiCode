@@ -15,16 +15,13 @@
  *     survives daemon restarts and tolerates branch resurrection.
  */
 
-import { execFile } from "node:child_process";
 import fs from "node:fs";
-import { promisify } from "node:util";
+import path from "node:path";
 import { sanitizeBranchName } from "../config.js";
 import { logger } from "../services/logger.js";
 import { deleteCollection, getClient } from "../services/qdrant.js";
-import { clearMarkedDeadAt, getMarkedDeadAt, setMarkedDeadAt } from "./qdrant-meta.js";
+import { batchGetMarkedDeadAt, clearMarkedDeadAt, setMarkedDeadAt } from "./qdrant-meta.js";
 import { watchlist } from "./watchlist.js";
-
-const execFileP = promisify(execFile);
 
 const INACTIVITY_DAYS = Number.parseInt(
   process.env.SOCRATICODE_GC_INACTIVITY_DAYS ?? "14",
@@ -126,7 +123,8 @@ export function parseCollectionName(name: string): ParsedName | null {
  * Strips `origin/` prefixes so a remote-tracking ref and its local
  * counterpart collapse to one entry.
  *
- * Exported for unit testing.
+ * Exported for unit testing. Retained for the rare fallback callsite; the
+ * primary live-branch source is {@link readLiveBranchesFromGitDir}.
  */
 export function parseLiveBranchesFromGit(stdout: string): Set<string> {
   const out = new Set<string>();
@@ -140,39 +138,96 @@ export function parseLiveBranchesFromGit(stdout: string): Set<string> {
   return out;
 }
 
+function walkRefs(rootDir: string, prefix: string, out: Set<string>): void {
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(rootDir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const e of entries) {
+    if (e.name.startsWith(".")) continue; // .DS_Store etc.
+    if (!prefix && e.name === "HEAD") continue; // remotes/origin/HEAD symref
+    const sub = prefix ? `${prefix}/${e.name}` : e.name;
+    if (e.isDirectory()) {
+      walkRefs(path.join(rootDir, e.name), sub, out);
+    } else if (e.isFile()) {
+      const sanitized = sanitizeBranchName(sub);
+      if (sanitized) out.add(sanitized);
+    }
+  }
+}
+
+/**
+ * Build the live-branch set directly from `<commonDir>/refs/heads/**`,
+ * `<commonDir>/refs/remotes/origin/**`, and `<commonDir>/packed-refs`.
+ *
+ * Output parity with `git for-each-ref --format=%(refname:short) refs/heads
+ * refs/remotes/origin` after the same `origin/` strip + `sanitizeBranchName`
+ * transform applied by {@link parseLiveBranchesFromGit}. Skips dotfiles and
+ * the `refs/remotes/origin/HEAD` symref to match git's filtering.
+ *
+ * Exported for unit testing.
+ */
+export function readLiveBranchesFromGitDir(commonDir: string): Set<string> {
+  const out = new Set<string>();
+
+  // Loose refs.
+  walkRefs(path.join(commonDir, "refs", "heads"), "", out);
+  const originDir = path.join(commonDir, "refs", "remotes", "origin");
+  const originRefs = new Set<string>();
+  walkRefs(originDir, "", originRefs);
+  for (const r of originRefs) out.add(r); // already sanitized, no origin/ prefix in our walk
+
+  // packed-refs: `<sha> <refname>` per line. Skip header (#) and peel (^) lines.
+  const packed = path.join(commonDir, "packed-refs");
+  let content: string;
+  try {
+    content = fs.readFileSync(packed, "utf-8");
+  } catch {
+    return out;
+  }
+  const HEADS = "refs/heads/";
+  const ORIGIN = "refs/remotes/origin/";
+  for (const line of content.split("\n")) {
+    if (!line || line.startsWith("#") || line.startsWith("^")) continue;
+    const sp = line.indexOf(" ");
+    if (sp <= 0) continue;
+    const ref = line.slice(sp + 1).trim();
+    let name: string | null = null;
+    if (ref.startsWith(HEADS)) name = ref.slice(HEADS.length);
+    else if (ref.startsWith(ORIGIN)) {
+      const tail = ref.slice(ORIGIN.length);
+      if (tail !== "HEAD") name = tail;
+    }
+    if (name == null) continue;
+    const sanitized = sanitizeBranchName(name);
+    if (sanitized) out.add(sanitized);
+  }
+  return out;
+}
+
 /**
  * Build a {repoId → Set<branchName>} map from the watchlist.
  *
- * For each unique repoId with a non-null commonDir, run `git for-each-ref`
- * once and stash the resulting live-branch set. If `git for-each-ref` fails
- * for a repo (transient I/O, missing git binary, corrupted refs, etc.), that
- * repo is *omitted* from the map — callers see `undefined` and skip GC for
- * that repo entirely (fail-open).
+ * For each unique repoId with a non-null commonDir, read refs directly from
+ * the .git layout (loose + packed). If reading throws unexpectedly the repo
+ * is omitted — callers see `undefined` and skip GC for that repo entirely
+ * (fail-open).
  */
-async function collectLiveBranchesPerRepo(): Promise<Map<string, Set<string>>> {
+function collectLiveBranchesPerRepo(): Map<string, Set<string>> {
   const out = new Map<string, Set<string>>();
   for (const entry of watchlist.entries()) {
     if (!entry.commonDir) continue;
     if (out.has(entry.repoId)) continue;
     try {
-      const { stdout } = await execFileP(
-        "git",
-        [
-          "for-each-ref",
-          "--format=%(refname:short)",
-          "refs/heads",
-          "refs/remotes/origin",
-        ],
-        { cwd: entry.path, timeout: 5000 },
-      );
-      out.set(entry.repoId, parseLiveBranchesFromGit(stdout));
+      out.set(entry.repoId, readLiveBranchesFromGitDir(entry.commonDir));
     } catch (err) {
-      logger.warn("git for-each-ref failed; skipping repo for collection GC", {
+      logger.warn("readLiveBranchesFromGitDir threw; skipping repo for collection GC", {
         repoId: entry.repoId,
         path: entry.path,
         error: err instanceof Error ? err.message : String(err),
       });
-      // Don't fall through — refusing to GC on incomplete info.
     }
   }
   return out;
@@ -188,11 +243,16 @@ export async function runCollectionGc(opts: {
     deleted: [],
     failed: [],
   };
-  const liveByRepo = await collectLiveBranchesPerRepo();
+  const liveByRepo = collectLiveBranchesPerRepo();
   const qdrant = getClient();
   const { collections } = await qdrant.getCollections().catch(() => ({
     collections: [] as Array<{ name: string }>,
   }));
+
+  // Single batched retrieve over every collection's metadata point — one RTT
+  // for the whole sweep instead of N. Missing or unreadable entries surface
+  // as null in the map, identical to the per-call behavior of getMarkedDeadAt.
+  const markedDeadByName = await batchGetMarkedDeadAt(collections.map((c) => c.name));
 
   for (const c of collections) {
     report.scanned += 1;
@@ -202,7 +262,7 @@ export async function runCollectionGc(opts: {
     if (!liveSet) continue; // unknown repoId — leave alone (fail-open)
 
     const isLive = parsed.branch != null && liveSet.has(parsed.branch);
-    const markedAt = await getMarkedDeadAt(c.name).catch(() => null);
+    const markedAt = markedDeadByName.get(c.name) ?? null;
 
     if (isLive) {
       // Branch resurrection: clear any stale `markedDeadAt` so the next
